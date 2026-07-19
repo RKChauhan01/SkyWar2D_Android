@@ -1,0 +1,12 @@
+
+# Group 1: Apply rules to all search engine crawlers
+User-agent: *
+Allow: /
+
+# Exclude sensitive or technical directories (adjust if you add these later)
+Disallow: /admin/
+Disallow: /config/
+
+# Host and Sitemap locations
+Host: skywar2d.parivartya.in
+Sitemap: https://skywar2d.parivartya.in/public/sitemap.xml

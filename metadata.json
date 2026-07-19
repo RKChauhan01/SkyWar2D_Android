@@ -1,0 +1,5 @@
+{
+  "name": "Sky War 2D : Space Shooting Arena",
+  "description": "An action-packed, landscape-oriented space shooter game featuring wave-based enemies, tracking player alignment, custom synthesized sound effects, and smooth arcade controls.",
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

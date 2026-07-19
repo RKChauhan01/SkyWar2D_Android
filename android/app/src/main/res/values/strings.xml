@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Sky War 2D</string>
+    <string name="title_activity_main">Sky War 2D</string>
+    <string name="package_name">com.parivartya.skywar2d</string>
+    <string name="custom_url_scheme">com.parivartya.skywar2d</string>
+</resources>

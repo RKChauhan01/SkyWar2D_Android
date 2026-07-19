@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Reusable, hardened global helper primitives
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    function isNumeric(val) {
+      return val is int || val is float;
+    }
+
+    // Leaderboard Collection
+    match /leaderboard/{entryId} {
+      allow read: if true;
+      allow create: if isValidId(entryId)
+                    && request.resource.data.playerName is string 
+                    && request.resource.data.playerName.size() >= 1 
+                    && request.resource.data.playerName.size() <= 25 
+                    && isNumeric(request.resource.data.score) 
+                    && request.resource.data.score >= 0;
+      allow update, delete: if false;
+    }
+
+    // Rooms Collection
+    match /rooms/{roomId} {
+      allow read: if true;
+      allow write: if isValidId(roomId);
+
+      // Embedded Players Subcollection
+      match /players/{playerId} {
+        allow read: if true;
+        allow write: if isValidId(playerId);
+      }
+
+      // Bricks Subcollection
+      match /bricks/{brickId} {
+        allow read: if true;
+        allow write: if isValidId(brickId);
+      }
+
+      // Powerups Subcollection
+      match /powerups/{powerUpId} {
+        allow read: if true;
+        allow write: if isValidId(powerUpId);
+      }
+    }
+  }
+}

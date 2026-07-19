@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <script>
+    // Intercept and safely suppress unhandled third-party script and iframe permission/sandbox errors
+    window.addEventListener('error', function (e) {
+      if (!e) return;
+      var msg = e.message || '';
+      var filename = e.filename || '';
+      if (
+        msg.indexOf('Script error') !== -1 ||
+        msg.indexOf('not granted') !== -1 ||
+        msg.indexOf('permission') !== -1 ||
+        filename.indexOf('effectivecpmnetwork') !== -1 ||
+        filename.indexOf('highperformanceformat') !== -1
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        return true;
+      }
+    }, true);
+
+    window.addEventListener('unhandledrejection', function (e) {
+      if (!e) return;
+      var reason = e.reason;
+      var msg = reason instanceof Error ? reason.message : String(reason);
+      if (
+        msg.indexOf('not granted') !== -1 ||
+        msg.indexOf('fullscreen') !== -1 ||
+        msg.indexOf('orientation') !== -1 ||
+        msg.indexOf('permission') !== -1 ||
+        msg.indexOf('Script error') !== -1
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
+  </script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no,viewport-fit=cover">
+  <title>Sky War 2D : Space Shooting Arena</title>
+  <!-- SEO Meta Tags -->
+  <meta name="title" content="Sky War 2D : Space Shooting Arena" />
+  <link rel="canonical" href="https://skywar2d.parivartya.in/">
+  <link rel="icon" href="assets/SkyWar2D.png" sizes="48x48" type="image/x-icon">
+  <meta name="description"
+    content="Sky War 2D: Space Shooting Arena is a high-octane modern retro action space fighting simulator. Pilot advanced spacecraft modules, blast aggressive swarm waves, activate weapon power-ups, and climb the live pilot leaderboard!" />
+  <meta name="keywords"
+    content="sky war 2d, space shooting arena, space shooter, parivarta game, parivartya, wave survival, Parivartya Space Shooter, Parivartya Space Shooter, Parivartya Sky War 2d" />
+  <meta name="author" content="Parivartya Corporation" />
+
+  <!-- Open Graph/Social Engagement Tags -->
+  <meta property="og:title" content="Sky War 2D : Space Shooting Arena" />
+  <meta property="og:description"
+    content="Intense wave-based custom fighter dogfights with live leaderboard ranks. Dominate the space shooting arena now!" />
+  <meta property="og:type" content="website" />
+
+  <!-- Twitter Card Engagement Tags -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Sky War 2D : Space Shooting Arena" />
+  <meta name="twitter:description"
+    content="Intense wave-based custom fighter dogfights with live leaderboard ranks. Dominate the space shooting arena now!" />
+
+  <!-- Verification Code -->
+  <meta name="google-site-verification" content="zbO4QGsrY5IOrrvf5YRnkW_DKUYVEJP51LD7phw296g" />
+</head>
+
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+
+
+
+</body>
+
+</html>

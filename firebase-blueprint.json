@@ -1,0 +1,141 @@
+{
+  "entities": {
+    "LeaderboardEntry": {
+      "title": "Leaderboard Entry",
+      "description": "A single player's top score in the space shooter game.",
+      "type": "object",
+      "properties": {
+        "playerName": {
+          "type": "string",
+          "description": "User chosen pilot name"
+        },
+        "score": {
+          "type": "number",
+          "description": "High score earned by the player"
+        },
+        "socialUrl": {
+          "type": "string",
+          "description": "Social media profile URL (optional)"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the score submission"
+        }
+      },
+      "required": ["playerName", "score", "createdAt"]
+    },
+    "Room": {
+      "title": "Room",
+      "description": "Multiplayer game session",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "description": "Unique room ID"
+        },
+        "hostId": {
+          "type": "string",
+          "description": "Auth UID of the room host"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["lobby", "playing", "gameover"],
+          "description": "Current status of the room"
+        },
+        "currentWave": {
+          "type": "number",
+          "description": "Current wave index"
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Timestamp when the room was created"
+        }
+      },
+      "required": ["roomId", "hostId", "status", "currentWave", "createdAt"]
+    },
+    "Player": {
+      "title": "Player",
+      "description": "A pilot within a multiplayer room",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Auth UID of the player"
+        },
+        "name": {
+          "type": "string",
+          "description": "Name of the pilot"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "ready"],
+          "description": "Current status of the player"
+        },
+        "x": {
+          "type": "number",
+          "description": "X coordinate"
+        },
+        "y": {
+          "type": "number",
+          "description": "Y coordinate"
+        },
+        "angle": {
+          "type": "number",
+          "description": "Ship orientation angle"
+        },
+        "score": {
+          "type": "number",
+          "description": "Player's room score"
+        },
+        "health": {
+          "type": "number",
+          "description": "Current player health"
+        },
+        "maxHealth": {
+          "type": "number",
+          "description": "Maximum player health"
+        },
+        "isInvulnerable": {
+          "type": "boolean",
+          "description": "Vulnerability status"
+        },
+        "activePowerUp": {
+          "type": "string",
+          "description": "Active power-up type"
+        },
+        "isFiring": {
+          "type": "boolean",
+          "description": "If weapon active"
+        },
+        "lastUpdatedAt": {
+          "type": "number",
+          "description": "Unix timestamp"
+        },
+        "lives": {
+          "type": "number",
+          "description": "Remaining lives"
+        }
+      },
+      "required": ["id", "name", "status", "x", "y", "angle", "score", "health", "maxHealth", "isInvulnerable", "isFiring", "lastUpdatedAt", "lives"]
+    }
+  },
+  "firestore": {
+    "/leaderboard/{entryId}": {
+      "schema": "LeaderboardEntry",
+      "description": "The highscore list collection"
+    },
+    "/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Multiplayer rooms meta document"
+    },
+    "/rooms/{roomId}/players/{playerId}": {
+      "schema": "Player",
+      "description": "Players in multiplayer room"
+    }
+  }
+}
