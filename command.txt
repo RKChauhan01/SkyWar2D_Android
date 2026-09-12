@@ -1,0 +1,38 @@
+# Start development
+npm run dev
+
+# Build web assets
+npm run build
+
+# Sync to Android
+npx cap sync android
+
+# Open Android Studio
+npx cap open android
+
+# Go to Android project
+cd android
+
+# Clean
+.\gradlew clean
+
+# Build Debug APK
+.\gradlew assembleDebug
+
+# Build Release APK
+.\gradlew assembleRelease
+
+# Build Release AAB
+.\gradlew bundleRelease
+
+# Show connected devices
+adb devices
+
+# Install Debug APK
+adb install app\build\outputs\apk\debug\app-debug.apk
+
+# Install Release APK
+adb install app\build\outputs\apk\release\app-release.apk
+
+# Show signing report (SHA-1)
+.\gradlew signingReport

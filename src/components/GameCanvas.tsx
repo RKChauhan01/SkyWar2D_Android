@@ -24,7 +24,13 @@ import {
   Settings,
   Users,
   WifiOff,
-  Tv
+  Tv,
+  Lock,
+  Gamepad2,
+  ChevronLeft,
+  ArrowLeft,
+  Clock,
+  User
 } from 'lucide-react';
 import { Player, Enemy, Bullet, Particle, Star, PowerUp, GameStateStatus, Wave, Brick } from '../types';
 import { audio } from '../utils/audio';
@@ -51,7 +57,9 @@ import {
   syncPowerUp,
   deletePowerUp,
   listenToPowerUps,
-  clearMultiplayerEntities
+  clearMultiplayerEntities,
+  joinOrCreateMatchmakingRoom,
+  startMultiplayerGame
 } from '../utils/multiplayer';
 
 const LOGICAL_WIDTH = 1200;
@@ -119,6 +127,8 @@ export default function GameCanvas({
 
   // Sound Muted state
   const [muted, setMuted] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(() => audio.isSoundEnabled());
+  const [musicEnabled, setMusicEnabled] = useState(() => audio.isMusicEnabled());
 
   // Rewarded Ad & AdMob Integration States
   const [networkOnline, setNetworkOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
@@ -126,6 +136,23 @@ export default function GameCanvas({
   const [isWatchingAd, setIsWatchingAd] = useState(false);
   const [adCountdown, setAdCountdown] = useState(5);
   const [adRewardClaimed, setAdRewardClaimed] = useState(false);
+
+  // Retro Synth Background Music lifecycle and autoplay-unblocking listeners
+  useEffect(() => {
+    audio.startMusic();
+    
+    const handleUserInteraction = () => {
+      audio.startMusic();
+    };
+    window.addEventListener('click', handleUserInteraction, { once: true });
+    window.addEventListener('keydown', handleUserInteraction, { once: true });
+    
+    return () => {
+      audio.stopMusic();
+      window.removeEventListener('click', handleUserInteraction);
+      window.removeEventListener('keydown', handleUserInteraction);
+    };
+  }, []);
 
   // Listen to network status changes
   useEffect(() => {
@@ -138,6 +165,15 @@ export default function GameCanvas({
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Clean up any active matchmaking listeners on component unmount
+  useEffect(() => {
+    return () => {
+      if (matchmakingUnsubscribeRef.current) {
+        matchmakingUnsubscribeRef.current();
+      }
     };
   }, []);
 
@@ -300,7 +336,106 @@ export default function GameCanvas({
   const [localMyId, setLocalMyId] = useState<string | undefined>(undefined);
   const [localIsHost, setLocalIsHost] = useState<boolean | undefined>(undefined);
   const [showInnerLobby, setShowInnerLobby] = useState(false);
-  const [lobbyMode, setLobbyMode] = useState<'pvp' | 'coop'>('pvp');
+  const [lobbyMode, setLobbyMode] = useState<'pvp' | 'coop' | 'matchmaking_pvp'>('pvp');
+
+  // Matchmaking and custom Online sub-selection states
+  const [showOnlineSelector, setShowOnlineSelector] = useState(false);
+  const [isMatchmaking, setIsMatchmaking] = useState(false);
+  const [matchmakingStatusText, setMatchmakingStatusText] = useState('');
+  const [matchmakingTimeLeft, setMatchmakingTimeLeft] = useState<number>(300);
+  const [matchmakingWinnerName, setMatchmakingWinnerName] = useState<string | null>(null);
+  const matchmakingUnsubscribeRef = React.useRef<(() => void) | null>(null);
+
+  const handleCancelMatchmaking = async () => {
+    setIsMatchmaking(false);
+    setMatchmakingStatusText('');
+    
+    if (matchmakingUnsubscribeRef.current) {
+      matchmakingUnsubscribeRef.current();
+      matchmakingUnsubscribeRef.current = null;
+    }
+
+    if (localRoomId && localMyId) {
+      try {
+        await exitRoom(localRoomId, localMyId, localIsHost || false);
+      } catch (err) {
+        console.warn("Matchmaking cleanup error:", err);
+      }
+    }
+
+    setLocalRoomId(undefined);
+    setLocalMyId(undefined);
+    setLocalIsHost(undefined);
+  };
+
+  const handleStartMatchmaking = async () => {
+    setIsMatchmaking(true);
+    setLobbyMode('matchmaking_pvp');
+    setMatchmakingStatusText('TRANSMITTING BEACONS... SEARCHING ALL SECTORS FOR AN ONLINE PILOT');
+    
+    try {
+      const name = pilotName || 'PILOT_RECRUIT';
+      const myId = getOrCreateVisitorId();
+      
+      const { roomId, isHost } = await joinOrCreateMatchmakingRoom(name, myId);
+      
+      setLocalRoomId(roomId);
+      setLocalMyId(myId);
+      setLocalIsHost(isHost);
+      activeRoomIdRef.current = roomId;
+      activeMyIdRef.current = myId;
+      activeIsHostRef.current = isHost;
+      
+      // Force set stateRef.current.roomGameMode so it starts correctly
+      stateRef.current.roomGameMode = 'matchmaking_pvp';
+
+      if (isHost) {
+        setMatchmakingStatusText('BEACON ESTABLISHED // STANDING BY FOR PILOT RESPONSE...');
+        
+        // Host listens to the players subcollection to wait for the second player to join
+        const unsub = listenToPlayers(roomId, async (playersList) => {
+          if (playersList.length >= 2) {
+            // Unsubscribe from matchmaking
+            if (matchmakingUnsubscribeRef.current) {
+              matchmakingUnsubscribeRef.current();
+              matchmakingUnsubscribeRef.current = null;
+            }
+            
+            // Set status to starting
+            setMatchmakingStatusText('OPFOR TARGET LOCKED! LAUNCHING INTERCEPT CORES...');
+            
+            // Wait 1.5 seconds for visual effect
+            setTimeout(async () => {
+              try {
+                await startMultiplayerGame(roomId);
+                setIsMatchmaking(false);
+                setShowOnlineSelector(false);
+                requestAppFullscreen();
+                startGame('matchmaking_pvp');
+              } catch (e) {
+                console.warn("Matchmaking start error:", e);
+                setIsMatchmaking(false);
+              }
+            }, 1500);
+          }
+        });
+        matchmakingUnsubscribeRef.current = unsub;
+      } else {
+        // Guest: immediately lock target and launch!
+        setMatchmakingStatusText('OPFOR SQUAD LOCKED // INITIALIZING WEAPONS DIAGNOSTIC...');
+        setTimeout(() => {
+          setIsMatchmaking(false);
+          setShowOnlineSelector(false);
+          requestAppFullscreen();
+          startGame('matchmaking_pvp');
+        }, 1500);
+      }
+    } catch (err: any) {
+      console.warn("Matchmaking error:", err);
+      setIsMatchmaking(false);
+      setSubmittingError(err.message || 'Squad connection failed.');
+    }
+  };
 
   const activeRoomId = multiplayerRoomId || localRoomId;
   const activeMyId = multiplayerMyId || localMyId;
@@ -339,6 +474,32 @@ export default function GameCanvas({
   const [waveBanner, setWaveBanner] = useState<string | null>(null);
   const [systemNotice, setSystemNotice] = useState<string | null>(null);
 
+  // Campaign Levels mode states
+  const [isLevelsMode, setIsLevelsMode] = useState(false);
+  const [selectedLevel, setSelectedLevel] = useState(1);
+  const [unlockedLevel, setUnlockedLevel] = useState(() => {
+    try {
+      const stored = localStorage.getItem('space_shooter_unlocked_level');
+      return stored ? parseInt(stored, 10) : 1;
+    } catch {
+      return 1;
+    }
+  });
+  const [showLevelSelect, setShowLevelSelect] = useState(false);
+  const [levelGroup, setLevelGroup] = useState(1); // 1 for Levels 1-10, 2 for Levels 11-20
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+
+  // Auto-set the level page group based on what level the player has currently unlocked
+  useEffect(() => {
+    if (showLevelSelect) {
+      if (unlockedLevel > 10) {
+        setLevelGroup(2);
+      } else {
+        setLevelGroup(1);
+      }
+    }
+  }, [showLevelSelect, unlockedLevel]);
+
   // Synchronization refs for the game loop to avoid stale closures on props/state
   const activeRoomIdRef = useRef<string | undefined>(undefined);
   const activeMyIdRef = useRef<string | undefined>(undefined);
@@ -349,6 +510,7 @@ export default function GameCanvas({
   useEffect(() => { activeMyIdRef.current = activeMyId; }, [activeMyId]);
   useEffect(() => { activeIsHostRef.current = activeIsHost; }, [activeIsHost]);
   useEffect(() => { pilotNameRef.current = pilotName; }, [pilotName]);
+  useEffect(() => { stateRef.current.isLevelsMode = isLevelsMode; }, [isLevelsMode]);
 
   // Touch and Mobile compatibility states
   const [isTouchCapable, setIsTouchCapable] = useState(false);
@@ -482,7 +644,10 @@ export default function GameCanvas({
     lastSpawnedPowerupTick: 0,
     roomCreatedAt: 0,
     gameStartTime: 0,
-    roomGameMode: 'pvp' as 'pvp' | 'coop',
+    roomGameMode: 'pvp' as 'pvp' | 'coop' | 'matchmaking_pvp',
+    isLevelsMode: false,
+    matchmakingTimeLeft: 300,
+    respawnTimer: 0,
   });
 
   // Handle dynamic touch capability detection
@@ -527,6 +692,34 @@ export default function GameCanvas({
   const starsRef = useRef<Star[]>([]);
   const powerUpsRef = useRef<PowerUp[]>([]);
   const bricksRef = useRef<Brick[]>([]);
+
+  // Preloaded image assets for enhanced GPU rendering performance
+  const imagesRef = useRef<Record<string, HTMLImageElement>>({});
+
+  useEffect(() => {
+    const assetMap = {
+      player_ship: '/assets/player_ship.png',
+      wingman_ship: '/assets/wingman_ship.png',
+      chaser: '/assets/chaser.png',
+      evader: '/assets/evader.png',
+      kamakze: '/assets/kamakze.png',
+      ranger: '/assets/ranger.png',
+      bullet_player: '/assets/bullet_player.png',
+      bullet_enemy: '/assets/bullet_enemy.png',
+      bullet_ranger: '/assets/bullet_ranger.png'
+    };
+
+    Object.entries(assetMap).forEach(([key, src]) => {
+      const img = new Image();
+      img.src = src;
+      img.onload = () => {
+        imagesRef.current[key] = img;
+      };
+      img.onerror = () => {
+        console.warn(`Failed to preload asset image: ${src}`);
+      };
+    });
+  }, []);
 
   // Multiplayer position and action tracking references
   const remotePlayersRef = useRef<Record<string, any>>({});
@@ -589,20 +782,20 @@ export default function GameCanvas({
   };
 
   // Explode effect with glowing star particles
-  const spawnExplosion = (x: number, y: number, color: string, count = 18, premiumGlow = true) => {
+  const spawnExplosion = (x: number, y: number, color: string, count = 12, premiumGlow = false) => {
     for (let i = 0; i < count; i++) {
       const angle = Math.random() * Math.PI * 2;
       const speed = Math.random() * 5 + 2;
       particlesRef.current.push({
-        id: Math.random().toString(),
+        id: '', // Avoid random string generations to reduce Garbage Collection memory churn
         x,
         y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
         color,
-        size: Math.random() * 4 + 2,
+        size: Math.random() * 3 + 1.5,
         alpha: 1,
-        decay: Math.random() * 0.03 + 0.015,
+        decay: Math.random() * 0.035 + 0.02,
         glow: premiumGlow
       });
     }
@@ -613,25 +806,29 @@ export default function GameCanvas({
     const targetAngle = Number(angle) + Math.PI + (Math.random() * 0.4 - 0.2);
     const speed = Math.random() * 2 + 1;
     particlesRef.current.push({
-      id: Math.random().toString(),
+      id: '', // Avoid heavy random string allocations
       x,
       y,
       vx: Math.cos(targetAngle) * speed + (Math.random() * 0.5 - 0.25),
       vy: Math.sin(targetAngle) * speed + (Math.random() * 0.5 - 0.25),
       color: Math.random() > 0.4 ? '#38bdf8' : '#f43f5e', // blue flame/orange core
-      size: Math.random() * 3 + 1.5,
+      size: Math.random() * 2 + 1,
       alpha: 0.8,
-      decay: 0.04,
+      decay: 0.05,
       glow: false
     });
   };
 
   // Setup game start parameters
-  const startGame = () => {
+  const startGame = (overrideMode?: 'pvp' | 'coop' | 'matchmaking_pvp', levelOverride?: number, forceLevelsMode?: boolean) => {
+    const currentRoomId = multiplayerRoomId || localRoomId || activeRoomIdRef.current;
+    const currentMyId = multiplayerMyId || localMyId || activeMyIdRef.current;
+    const currentIsHost = multiplayerIsHost !== undefined ? multiplayerIsHost : (localIsHost !== undefined ? localIsHost : activeIsHostRef.current);
+
     // Deterministic starting positions based on ID to avoid overlapping in Multiplayer
-    const idNum = activeMyId ? activeMyId.split('').reduce((a, b) => a + b.charCodeAt(0), 0) : 0;
-    const startX = activeRoomId ? (300 + (idNum % 600)) : LOGICAL_WIDTH / 2;
-    const startY = activeRoomId ? (200 + ((idNum * 13) % 300)) : LOGICAL_HEIGHT / 2;
+    const idNum = currentMyId ? currentMyId.split('').reduce((a, b) => a + b.charCodeAt(0), 0) : 0;
+    const startX = currentRoomId ? (300 + (idNum % 600)) : LOGICAL_WIDTH / 2;
+    const startY = currentRoomId ? (200 + ((idNum * 13) % 300)) : LOGICAL_HEIGHT / 2;
 
     playerRef.current = {
       x: startX,
@@ -657,12 +854,19 @@ export default function GameCanvas({
     bricksRef.current = [];
     floatingTextsRef.current = [];
 
-    if (activeRoomId && activeIsHost) {
-      clearMultiplayerEntities(activeRoomId).catch(console.warn);
+    if (currentRoomId && currentIsHost) {
+      clearMultiplayerEntities(currentRoomId).catch(console.warn);
     }
+
+    const isLvl = forceLevelsMode !== undefined ? forceLevelsMode : isLevelsMode;
+    stateRef.current.isLevelsMode = isLvl;
+    setIsLevelsMode(isLvl);
     
     stateRef.current.score = 0;
-    stateRef.current.waveNum = 1;
+    const startWaveNum = levelOverride !== undefined ? levelOverride : (isLvl ? selectedLevel : 1);
+    stateRef.current.waveNum = startWaveNum;
+    setWaveNum(startWaveNum);
+    
     stateRef.current.enemiesKilled = 0;
     stateRef.current.globalEnemyFireCooldown = 0;
     stateRef.current.activePowerUp = null;
@@ -671,7 +875,12 @@ export default function GameCanvas({
     stateRef.current.lastSpawnedPowerupTick = 0;
     stateRef.current.pvpPowerupTimer = 0;
     stateRef.current.gameStartTime = Date.now();
-    stateRef.current.roomGameMode = lobbyMode;
+    // Guard against React Event objects being passed as overrideMode when used in onClick={startGame}
+    const safeOverrideMode = (typeof overrideMode === 'string') ? overrideMode : undefined;
+    // Use explicitly passed override mode, or preserve existing 'coop' if already set by room listener, or fallback to current lobbyMode state
+    const activeMode = safeOverrideMode || (stateRef.current.roomGameMode === 'coop' ? 'coop' : lobbyMode);
+    stateRef.current.roomGameMode = activeMode;
+    setLobbyMode(activeMode);
     
     setMultiplayerWon(false);
     hasHadRemotePlayersRef.current = false;
@@ -686,14 +895,14 @@ export default function GameCanvas({
     fetchLeaderboard();
     
     updateReactStates();
-    startWave(1);
+    startWave(startWaveNum);
   };
 
   // Synchronized exit handler that removes player doc and exits the component entirely
   const handleCleanExit = async () => {
     if (activeRoomId && activeMyId) {
       try {
-        const deleteRoom = stateRef.current.roomGameMode === 'pvp' ? (activeIsHost || false) : false;
+        const deleteRoom = (stateRef.current.roomGameMode === 'pvp' || stateRef.current.roomGameMode === 'matchmaking_pvp') ? (activeIsHost || false) : false;
         await exitRoom(activeRoomId, activeMyId, deleteRoom);
       } catch (e) {
         console.warn("Error leaving room in database:", e);
@@ -721,7 +930,7 @@ export default function GameCanvas({
     // 1. Cleanup room state in database if in any multiplayer mode
     if (activeRoomId && activeMyId) {
       try {
-        const deleteRoom = stateRef.current.roomGameMode === 'pvp' ? (activeIsHost || false) : false;
+        const deleteRoom = (stateRef.current.roomGameMode === 'pvp' || stateRef.current.roomGameMode === 'matchmaking_pvp') ? (activeIsHost || false) : false;
         await exitRoom(activeRoomId, activeMyId, deleteRoom);
       } catch (e) {
         console.warn("Error leaving room in database:", e);
@@ -745,6 +954,25 @@ export default function GameCanvas({
     setLocalIsHost(undefined);
     setGameState('start');
     stateRef.current.gameState = 'start';
+  };
+
+  // Trigger level victory overlay & progression
+  const triggerLevelVictory = () => {
+    audio.play('powerup');
+    setGameState('victory');
+    stateRef.current.gameState = 'victory';
+
+    const currentLvl = stateRef.current.waveNum;
+    const nextLvl = currentLvl + 1;
+    if (nextLvl > unlockedLevel) {
+      setUnlockedLevel(nextLvl);
+      try {
+        localStorage.setItem('space_shooter_unlocked_level', nextLvl.toString());
+      } catch (e) {
+        console.warn(e);
+      }
+    }
+    updateReactStates();
   };
 
   // Set end-game parameters
@@ -782,12 +1010,70 @@ export default function GameCanvas({
     }
   };
 
+  // Trigger 3-second respawn loop in matchmaking pvp mode
+  const triggerLocalPvPRespawn = () => {
+    if (stateRef.current.respawnTimer > 0) return;
+    
+    audio.play('player_death');
+    spawnExplosion(playerRef.current.x, playerRef.current.y, '#f43f5e', 24, true);
+    triggerFloatingText("SHIP INOPERABLE // RESPAWNING IN 3 SEC...", playerRef.current.x, playerRef.current.y - 30, '#ef4444');
+    
+    playerRef.current.health = 0;
+    setPlayerHealth(0);
+    stateRef.current.respawnTimer = 180; // 3 seconds at 60fps
+    
+    if (activeRoomIdRef.current && activeMyIdRef.current) {
+      syncPlayerHealth(activeRoomIdRef.current, activeMyIdRef.current, 0).catch(console.warn);
+    }
+  };
+
+  // Conclude matchmaking 1v1 battle when 5-minute timer expires
+  const triggerMatchmakingTimeOut = () => {
+    const localKills = playerRef.current.kills || 0;
+    const remotePlayersList = Object.values(remotePlayersRef.current);
+    let maxRemoteKills = 0;
+    let opponentName = 'OPPONENT';
+    
+    remotePlayersList.forEach((rp: any) => {
+      const rpKills = rp.kills || 0;
+      if (rpKills > maxRemoteKills) {
+        maxRemoteKills = rpKills;
+        opponentName = rp.name || 'OPPONENT';
+      }
+    });
+    
+    let isVictory = false;
+    if (localKills > maxRemoteKills) {
+      isVictory = true;
+      setMatchmakingWinnerName(pilotName || 'YOU');
+      audio.play('powerup');
+    } else if (localKills < maxRemoteKills) {
+      isVictory = false;
+      setMatchmakingWinnerName(opponentName);
+      audio.play('player_death');
+    } else {
+      isVictory = false; // Draw counts as DRAW
+      setMatchmakingWinnerName('EQUAL SCORE DRAW');
+    }
+    
+    setMultiplayerWon(isVictory);
+    setGameState('gameover');
+    stateRef.current.gameState = 'gameover';
+    
+    if (activeRoomIdRef.current) {
+      setRoomGameOver(activeRoomIdRef.current).catch(console.warn);
+    }
+    
+    updateReactStates();
+  };
+
   // Start specific enemy numerical wave
   const startWave = (num: number) => {
     stateRef.current.waveNum = num;
     setWaveNum(num);
 
-    if (activeRoomId && stateRef.current.roomGameMode === 'pvp') {
+    const currentRoomId = multiplayerRoomId || localRoomId || activeRoomIdRef.current;
+    if (currentRoomId && (stateRef.current.roomGameMode === 'pvp' || stateRef.current.roomGameMode === 'matchmaking_pvp')) {
       // PvP special parameters (No wave spawns of enemies)
       stateRef.current.enemiesRemainingToSpawn = 0;
       stateRef.current.waveActive = false;
@@ -814,13 +1100,23 @@ export default function GameCanvas({
     }
     
     // Display wave alert banner
-    setWaveBanner(`WAVE ${num}`);
-    setTimeout(() => {
-      setWaveBanner(null);
-    }, 2500);
+    if (stateRef.current.isLevelsMode) {
+      setWaveBanner(`LEVEL ${num}`);
+      setTimeout(() => {
+        setWaveBanner(null);
+      }, 2500);
 
-    audio.play('wave_start');
-    triggerFloatingText(`WAVE ${num} INCOMING!`, LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2 - 80, '#22c55e');
+      audio.play('wave_start');
+      triggerFloatingText(`LEVEL ${num} INCOMING!`, LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2 - 80, '#22c55e');
+    } else {
+      setWaveBanner(`WAVE ${num}`);
+      setTimeout(() => {
+        setWaveBanner(null);
+      }, 2500);
+
+      audio.play('wave_start');
+      triggerFloatingText(`WAVE ${num} INCOMING!`, LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2 - 80, '#22c55e');
+    }
   };
 
   // Fire bullet function
@@ -877,6 +1173,12 @@ export default function GameCanvas({
 
   // Spawn an enemy with random vector boundaries and clever tracking attributes
   const spawnSingleEnemy = () => {
+    // If we are in an active multiplayer room AND the mode is PvP or matchmaking PvP, don't spawn AI enemies.
+    // Otherwise (Solo Play, Solo Campaign, Co-op), always spawn AI enemies!
+    const currentRoomId = multiplayerRoomId || localRoomId || activeRoomIdRef.current;
+    if (currentRoomId && (stateRef.current.roomGameMode === 'pvp' || stateRef.current.roomGameMode === 'matchmaking_pvp')) {
+      return;
+    }
     const wave = stateRef.current.waveNum;
     
     // Seeded random for deterministic enemy coordinates/types in Co-op
@@ -995,10 +1297,12 @@ export default function GameCanvas({
 
   // 1. If multiplayer is requested, automatically start the match bypassing starting screen
   useEffect(() => {
-    if (activeRoomId) {
-      startGame();
+    if (activeRoomId && gameState === 'start') {
+      if (lobbyMode !== 'matchmaking_pvp' && !isMatchmaking) {
+        startGame();
+      }
     }
-  }, [activeRoomId]);
+  }, [activeRoomId, lobbyMode, isMatchmaking, gameState]);
 
   // 2. Real-time room and players synchronizers
   useEffect(() => {
@@ -1032,7 +1336,7 @@ export default function GameCanvas({
 
       // Coordinate Game Over
       if (roomState.status === 'gameover' && stateRef.current.gameState !== 'gameover') {
-        const weWon = playerRef.current && playerRef.current.health > 0 && stateRef.current.roomGameMode === 'pvp';
+        const weWon = playerRef.current && playerRef.current.health > 0 && (stateRef.current.roomGameMode === 'pvp' || stateRef.current.roomGameMode === 'matchmaking_pvp');
         if (weWon) {
           setMultiplayerWon(true);
         } else {
@@ -1066,6 +1370,12 @@ export default function GameCanvas({
         const currentMyId = activeMyIdRef.current;
         // Handle local player damage synchronization from server (authoritative damage)
         if (currentMyId && p.id === currentMyId) {
+          if (stateRef.current.roomGameMode === 'coop') {
+            // In co-op mode, our local client is the authority for our own health.
+            // We publish our health to the server so other players can see it,
+            // but we do NOT let the server overwrite our local health.
+            return;
+          }
           // Guard: If we just started a new match, ignore any server health sync that is <= 0 (dead)
           // until we receive at least one alive health status (> 0) from the server for this match.
           // This prevents stale end-game player snapshots from the previous match causing immediate game-over.
@@ -1089,10 +1399,27 @@ export default function GameCanvas({
             
             playerRef.current.health = p.health;
             if (playerRef.current.health <= 0) {
-              triggerPlayerGameOver();
+              if (stateRef.current.roomGameMode === 'matchmaking_pvp') {
+                triggerLocalPvPRespawn();
+              } else {
+                triggerPlayerGameOver();
+              }
             }
           }
         } else {
+          // If remote player's health just went <= 0 in matchmaking pvp mode, we score a kill!
+          if (stateRef.current.roomGameMode === 'matchmaking_pvp' && stateRef.current.gameState === 'playing') {
+            const previousState = remotePlayersRef.current[p.id];
+            if (previousState && (previousState.health === undefined || previousState.health > 0) && p.health <= 0) {
+              playerRef.current.kills = (playerRef.current.kills || 0) + 1;
+              if (activeRoomIdRef.current && activeMyIdRef.current) {
+                updatePlayerState(activeRoomIdRef.current, activeMyIdRef.current, {
+                  kills: playerRef.current.kills
+                }).catch(console.warn);
+              }
+              triggerFloatingText("KILLED TARGET // +1 KILL!", LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2, '#4ade80');
+            }
+          }
           newRemote[p.id] = p;
           remoteCount++;
         }
@@ -1105,8 +1432,11 @@ export default function GameCanvas({
         if (remoteCount > 0) {
           hasHadRemotePlayersRef.current = true;
         } else if (hasHadRemotePlayersRef.current && remoteCount === 0) {
-          if (stateRef.current.roomGameMode === 'pvp') {
+          if (stateRef.current.roomGameMode === 'pvp' || stateRef.current.roomGameMode === 'matchmaking_pvp') {
             // The other player left! Emerge as victor!
+            if (stateRef.current.roomGameMode === 'matchmaking_pvp') {
+              setMatchmakingWinnerName(pilotName || 'YOU');
+            }
             setMultiplayerWon(true);
             setGameState('gameover');
             stateRef.current.gameState = 'gameover';
@@ -1199,6 +1529,40 @@ export default function GameCanvas({
     const updatePhysics = () => {
       const keys = stateRef.current.keys;
       const player = playerRef.current;
+
+      // Matchmaking 5-minute timer countdown logic
+      if (stateRef.current.roomGameMode === 'matchmaking_pvp' && stateRef.current.gameState === 'playing') {
+        const elapsed = Math.floor((Date.now() - stateRef.current.gameStartTime) / 1000);
+        const remaining = Math.max(0, 300 - elapsed);
+        if (stateRef.current.matchmakingTimeLeft !== remaining) {
+          stateRef.current.matchmakingTimeLeft = remaining;
+          setMatchmakingTimeLeft(remaining);
+          
+          if (remaining <= 0) {
+            triggerMatchmakingTimeOut();
+            return;
+          }
+        }
+      }
+
+      // Local matchmaking respawn countdown logic
+      if (stateRef.current.respawnTimer > 0) {
+        stateRef.current.respawnTimer--;
+        if (stateRef.current.respawnTimer === 0) {
+          // Respawn local ship with full shield
+          player.x = 200 + (Math.random() * (LOGICAL_WIDTH - 400));
+          player.y = 150 + (Math.random() * (LOGICAL_HEIGHT - 300));
+          player.health = 100;
+          setPlayerHealth(100);
+          player.isInvulnerable = true;
+          player.invulnerableTime = 120; // 2 seconds invulnerability
+          
+          if (activeRoomIdRef.current && activeMyIdRef.current) {
+            syncPlayerHealth(activeRoomIdRef.current, activeMyIdRef.current, 100).catch(console.warn);
+          }
+          triggerFloatingText("SHIP RECONSTRUCTED // SHIELDS UP!", player.x, player.y - 45, '#38bdf8');
+        }
+      }
 
       // Co-op double-death check
       if (activeRoomIdRef.current && stateRef.current.roomGameMode === 'coop' && stateRef.current.gameState === 'playing') {
@@ -1358,7 +1722,7 @@ export default function GameCanvas({
               const rnd = createSeededRandom(seed);
               trickleRand = rnd();
             }
-            stateRef.current.enemySpawnTimer = 45 + trickleRand * 40; 
+            stateRef.current.enemySpawnTimer = 300; // Exactly 5 seconds at 60fps
           }
         } else if (enemiesRef.current.length === 0) {
           // Wave complete!
@@ -1378,11 +1742,19 @@ export default function GameCanvas({
             // Joiner will start the wave automatically via listenToRoom's firestore sync!
           } else {
             // Solo play
-            setTimeout(() => {
-              if (stateRef.current.gameState === 'playing') {
-                startWave(nextWave);
-              }
-            }, 2000);
+            if (stateRef.current.isLevelsMode) {
+              setTimeout(() => {
+                if (stateRef.current.gameState === 'playing') {
+                  triggerLevelVictory();
+                }
+              }, 1500);
+            } else {
+              setTimeout(() => {
+                if (stateRef.current.gameState === 'playing') {
+                  startWave(nextWave);
+                }
+              }, 2000);
+            }
           }
         }
       }
@@ -1418,21 +1790,21 @@ export default function GameCanvas({
 
         let targetX = player.x;
         let targetY = player.y;
-        let distToTarget = Math.sqrt((player.x - enemy.x)**2 + (player.y - enemy.y)**2);
+        let minDistSq = (player.x - enemy.x)**2 + (player.y - enemy.y)**2;
 
         if (player.health <= 0) {
-          distToTarget = Infinity;
+          minDistSq = Infinity;
         }
 
-        // In Co-op, check other players as well and target the nearest alive one
+        // In Co-op, check other players as well and target the nearest alive one (using fast squared distance search)
         if (activeRoomIdRef.current && stateRef.current.roomGameMode === 'coop') {
           Object.values(remotePlayersRef.current).forEach((rp: any) => {
             if (rp.health > 0) {
               const rDx = rp.x - enemy.x;
               const rDy = rp.y - enemy.y;
-              const rDist = Math.sqrt(rDx * rDx + rDy * rDy);
-              if (rDist < distToTarget) {
-                distToTarget = rDist;
+              const rDistSq = rDx * rDx + rDy * rDy;
+              if (rDistSq < minDistSq) {
+                minDistSq = rDistSq;
                 targetX = rp.x;
                 targetY = rp.y;
               }
@@ -1442,7 +1814,7 @@ export default function GameCanvas({
 
         const pDx = targetX - enemy.x;
         const pDy = targetY - enemy.y;
-        const distToPlayer = distToTarget;
+        const distToPlayer = minDistSq === Infinity ? Infinity : Math.sqrt(minDistSq); // Single square root operation per enemy
 
         // Normalize basic chase vector to player
         const dirX = distToPlayer > 0 ? pDx / distToPlayer : 0;
@@ -1474,21 +1846,22 @@ export default function GameCanvas({
             targetVy = dirX * enemy.speed;
           }
 
-          // INTELLIGENT DODGING logic: detect oncoming player lasers and dodge them!
+          // INTELLIGENT DODGING logic: detect oncoming player lasers and dodge them (highly optimized squared checks)
           playerBullets.forEach((b) => {
             const ebDx = b.x - enemy.x;
             const ebDy = b.y - enemy.y;
-            const distToBullet = Math.sqrt(ebDx * ebDx + ebDy * ebDy);
+            const distToBulletSq = ebDx * ebDx + ebDy * ebDy;
             
             // If bullet is close and travelling towards the enemy, slide outwards perpendicular!
-            if (distToBullet < 180) {
+            if (distToBulletSq < 32400) { // 180 * 180 = 32400 (skip Math.sqrt entirely for far bullets!)
               const dotProduct = (b.vx * ebDx + b.vy * ebDy);
               if (dotProduct < 0) { // Moving close!
                 // Dodge left or right perpendicular to bullet vector
                 const perpX = -b.vy;
                 const perpY = b.vx;
-                const len = Math.sqrt(perpX * perpX + perpY * perpY);
-                if (len > 0) {
+                const lenSq = perpX * perpX + perpY * perpY;
+                if (lenSq > 0) {
+                  const len = Math.sqrt(lenSq);
                   targetVx += (perpX / len) * (enemy.speed * 1.8);
                   targetVy += (perpY / len) * (enemy.speed * 1.8);
                 }
@@ -1578,9 +1951,10 @@ export default function GameCanvas({
       powerUpsRef.current.forEach((pw) => {
         const dx = player.x - pw.x;
         const dy = player.y - pw.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
+        const distSq = dx * dx + dy * dy;
+        const radiusSum = player.radius + pw.radius;
 
-        if (dist < player.radius + pw.radius) {
+        if (distSq < radiusSum * radiusSum) {
           // Collected!
           audio.play('powerup');
           if (activeRoomIdRef.current) {
@@ -1645,7 +2019,7 @@ export default function GameCanvas({
       }
 
       // 10c. Deterministic Brick Spawner (Spawn protecting barrier blocks in straight lines frequently in PvP mode)
-      if (activeRoomIdRef.current && stateRef.current.gameState === 'playing' && stateRef.current.roomGameMode === 'pvp') {
+      if (activeRoomIdRef.current && stateRef.current.gameState === 'playing' && (stateRef.current.roomGameMode === 'pvp' || stateRef.current.roomGameMode === 'matchmaking_pvp')) {
         if (activeIsHostRef.current) {
           const brickIntervalMs = 1800; // Increased frequency (was 2600ms)
           const baseTime = stateRef.current.gameStartTime || stateRef.current.roomCreatedAt || Date.now();
@@ -1760,7 +2134,7 @@ export default function GameCanvas({
 
         const currentRoomId = activeRoomIdRef.current;
         const currentMyId = activeMyIdRef.current;
-        if (currentRoomId && stateRef.current.roomGameMode === 'pvp') {
+        if (currentRoomId && (stateRef.current.roomGameMode === 'pvp' || stateRef.current.roomGameMode === 'matchmaking_pvp')) {
           // ONLINE PVP MULTIPLAYER COLLIDE
           if (bullet.isLocalPlayerBullet) {
             // Local player bullet hits remote player
@@ -1768,8 +2142,9 @@ export default function GameCanvas({
               if (!currentMyId || rp.id === currentMyId || rp.health <= 0) return;
               const dx = bullet.x - rp.x;
               const dy = bullet.y - rp.y;
-              const dist = Math.sqrt(dx*dx + dy*dy);
-              if (dist < bullet.radius + 18) { // 18 is standard remote ship collision radius
+              const distSq = dx*dx + dy*dy;
+              const radiusSum = bullet.radius + 18; // 18 is standard remote ship collision radius
+              if (distSq < radiusSum * radiusSum) {
                 bullet.damage = 0; // Destroy bullet
                 audio.play('enemy_hit');
                 spawnExplosion(bullet.x, bullet.y, rp.color || '#38bdf8', 4, false);
@@ -1780,7 +2155,7 @@ export default function GameCanvas({
                   damagePlayer(currentRoomId, rp.id, 10);
                 } else {
                   // Visual feedback for shield hit
-                  spawnExplosion(bullet.x, bullet.y, '#a855f7', 6, true);
+                  spawnExplosion(bullet.x, bullet.y, '#a855f7', 6, false);
                   triggerFloatingText("ABSORBED", rp.x, rp.y - 30, '#c084fc');
                 }
                 
@@ -1793,8 +2168,9 @@ export default function GameCanvas({
             // Remote player bullet hits local player
             const dx = bullet.x - player.x;
             const dy = bullet.y - player.y;
-            const dist = Math.sqrt(dx*dx + dy*dy);
-            if (dist < bullet.radius + player.radius) {
+            const distSq = dx*dx + dy*dy;
+            const radiusSum = bullet.radius + player.radius;
+            if (distSq < radiusSum * radiusSum) {
               bullet.damage = 0; // Clear bullet
               if (!player.isInvulnerable && player.health > 0) {
                 player.health -= 10; // PvP bullet damage
@@ -1804,11 +2180,15 @@ export default function GameCanvas({
                 spawnExplosion(player.x, player.y, '#f43f5e', 8, false);
                 triggerFloatingText("-10 HEALTH", player.x, player.y - 25, '#f43f5e');
                 if (player.health <= 0) {
-                  triggerPlayerGameOver();
+                  if (stateRef.current.roomGameMode === 'matchmaking_pvp') {
+                    triggerLocalPvPRespawn();
+                  } else {
+                    triggerPlayerGameOver();
+                  }
                 }
               } else if (player.isInvulnerable) {
                 audio.play('enemy_hit');
-                spawnExplosion(bullet.x, bullet.y, '#a855f7', 6, true);
+                spawnExplosion(bullet.x, bullet.y, '#a855f7', 6, false);
                 triggerFloatingText("ABSORBED", player.x, player.y - 35, '#c084fc');
               }
             }
@@ -1821,9 +2201,10 @@ export default function GameCanvas({
               if (enemy.health <= 0) return;
               const dx = bullet.x - enemy.x;
               const dy = bullet.y - enemy.y;
-              const dist = Math.sqrt(dx*dx + dy*dy);
+              const distSq = dx*dx + dy*dy;
+              const radiusSum = bullet.radius + enemy.radius;
 
-              if (dist < bullet.radius + enemy.radius) {
+              if (distSq < radiusSum * radiusSum) {
                 // Register hit !
                 enemy.health -= bullet.damage;
                 bullet.damage = 0; // Destroy bullet trigger
@@ -1835,7 +2216,7 @@ export default function GameCanvas({
                 // Check death
                 if (enemy.health <= 0) {
                   audio.play('enemy_death');
-                  spawnExplosion(enemy.x, enemy.y, enemy.color, 16, true);
+                  spawnExplosion(enemy.x, enemy.y, enemy.color, 12, false);
                   
                   // Add score
                   stateRef.current.score += enemy.scoreValue;
@@ -1877,9 +2258,10 @@ export default function GameCanvas({
             // Enemy bullet hit Player
             const dx = bullet.x - player.x;
             const dy = bullet.y - player.y;
-            const dist = Math.sqrt(dx*dx + dy*dy);
+            const distSq = dx*dx + dy*dy;
+            const radiusSum = bullet.radius + player.radius;
 
-            if (dist < bullet.radius + player.radius) {
+            if (distSq < radiusSum * radiusSum) {
               bullet.damage = 0; // Clear bullet
 
               if (!player.isInvulnerable) {
@@ -1899,7 +2281,7 @@ export default function GameCanvas({
               } else {
                 // Absorbed by defensive shields
                 audio.play('enemy_hit');
-                spawnExplosion(bullet.x, bullet.y, '#a855f7', 4, true);
+                spawnExplosion(bullet.x, bullet.y, '#a855f7', 4, false);
                 triggerFloatingText("SHIELDED BLOCK", player.x, player.y - 25, '#c084fc');
               }
             }
@@ -1915,13 +2297,14 @@ export default function GameCanvas({
         if (enemy.health <= 0) return;
         const dx = enemy.x - player.x;
         const dy = enemy.y - player.y;
-        const dist = Math.sqrt(dx*dx + dy*dy);
+        const distSq = dx*dx + dy*dy;
+        const radiusSum = enemy.radius + player.radius;
 
-        if (dist < enemy.radius + player.radius) {
+        if (distSq < radiusSum * radiusSum) {
           // Destroy enemy on physical ramming trigger
           enemy.health = 0;
           audio.play('enemy_death');
-          spawnExplosion(enemy.x, enemy.y, enemy.color, 14, true);
+          spawnExplosion(enemy.x, enemy.y, enemy.color, 12, false);
 
           if (!player.isInvulnerable) {
             player.health -= 25; // Large collision hit
@@ -1991,7 +2374,7 @@ export default function GameCanvas({
             name: pilotNameRef.current, // use ref value
             color: playerRef.current.color,
             score: stateRef.current.score,
-            // health: playerRef.current.health, // REMOVED: Authoritative server health is source of truth for health
+            ...(stateRef.current.roomGameMode === 'coop' ? { health: playerRef.current.health } : {}),
             maxHealth: playerRef.current.maxHealth,
             isInvulnerable: playerRef.current.isInvulnerable,
             activePowerUp: stateRef.current.activePowerUp,
@@ -2121,7 +2504,7 @@ export default function GameCanvas({
         const pulse = Math.sin(time) * 3;
         
         ctx.save();
-        ctx.shadowBlur = 12;
+        ctx.shadowBlur = 3;
 
         let pwColor = '#ef4444';
         let shortcutLabel = 'H';
@@ -2168,7 +2551,7 @@ export default function GameCanvas({
         ctx.save();
         ctx.translate(br.x, br.y);
         
-        ctx.shadowBlur = 15;
+        ctx.shadowBlur = 3;
         ctx.shadowColor = br.color;
         
         // Face fill (translucent sci-fi shield grid style)
@@ -2218,7 +2601,7 @@ export default function GameCanvas({
             ctx.save();
             ctx.translate(rp.x, rp.y);
             ctx.rotate(rp.angle);
-            ctx.shadowBlur = 10;
+            ctx.shadowBlur = 2;
             ctx.shadowColor = '#64748b';
             ctx.strokeStyle = '#475569';
             ctx.fillStyle = '#1e293b';
@@ -2250,39 +2633,45 @@ export default function GameCanvas({
             ctx.translate(cached.x, cached.y);
             ctx.rotate(cached.angle);
 
-            // Ship neon skin based on player color
-            const rpColor = '#f43f5e'; // Always red for remote players
-            ctx.shadowBlur = 18;
-            ctx.shadowColor = rp.activePowerUp ? '#ec4899' : rpColor;
+            const wingmanImg = imagesRef.current.wingman_ship;
+            if (wingmanImg && wingmanImg.complete && wingmanImg.naturalWidth !== 0) {
+              const shipSize = 44; // Standard visual radius scale
+              ctx.drawImage(wingmanImg, -shipSize / 2, -shipSize / 2, shipSize, shipSize);
+            } else {
+              // Ship neon skin based on player color (Vector Fallback)
+              const rpColor = '#f43f5e'; // Always red for remote players
+              ctx.shadowBlur = 4;
+              ctx.shadowColor = rp.activePowerUp ? '#ec4899' : rpColor;
 
-            ctx.fillStyle = '#111827';
-            ctx.strokeStyle = rp.activePowerUp ? '#f472b6' : rpColor;
-            ctx.lineWidth = 3;
+              ctx.fillStyle = '#111827';
+              ctx.strokeStyle = rp.activePowerUp ? '#f472b6' : rpColor;
+              ctx.lineWidth = 3;
 
-            ctx.beginPath();
-            // Nose tip
-            ctx.moveTo(22, 0);
-            // Left wing
-            ctx.lineTo(-18, -18);
-            // Left inner jet engine
-            ctx.lineTo(-12, -8);
-            // Right inner jet
-            ctx.lineTo(-12, 8);
-            // Right wing
-            ctx.lineTo(-18, 18);
-            ctx.closePath();
-            ctx.fill();
-            ctx.stroke();
+              ctx.beginPath();
+              // Nose tip
+              ctx.moveTo(22, 0);
+              // Left wing
+              ctx.lineTo(-18, -18);
+              // Left inner jet engine
+              ctx.lineTo(-12, -8);
+              // Right inner jet
+              ctx.lineTo(-12, 8);
+              // Right wing
+              ctx.lineTo(-18, 18);
+              ctx.closePath();
+              ctx.fill();
+              ctx.stroke();
 
-            // Cockpit glass
-            ctx.fillStyle = rp.color || '#ec4899';
-            ctx.beginPath();
-            ctx.moveTo(13, 0);
-            ctx.lineTo(-2, -6);
-            ctx.lineTo(-10, 0);
-            ctx.lineTo(-2, 6);
-            ctx.closePath();
-            ctx.fill();
+              // Cockpit glass
+              ctx.fillStyle = rp.color || '#ec4899';
+              ctx.beginPath();
+              ctx.moveTo(13, 0);
+              ctx.lineTo(-2, -6);
+              ctx.lineTo(-10, 0);
+              ctx.lineTo(-2, 6);
+              ctx.closePath();
+              ctx.fill();
+            }
 
             ctx.restore();
 
@@ -2290,7 +2679,7 @@ export default function GameCanvas({
             if (rp.isInvulnerable) {
               ctx.save();
               const shieldColor = rp.color || '#ec4899';
-              ctx.shadowBlur = 15;
+              ctx.shadowBlur = 3;
               ctx.shadowColor = shieldColor;
               ctx.strokeStyle = `${shieldColor}ee`;
               ctx.lineWidth = 2.5;
@@ -2325,7 +2714,7 @@ export default function GameCanvas({
           ctx.save();
           ctx.translate(p.x, p.y);
           ctx.rotate(p.angle);
-          ctx.shadowBlur = 10;
+          ctx.shadowBlur = 2;
           ctx.shadowColor = '#64748b';
           ctx.strokeStyle = '#475569';
           ctx.fillStyle = '#1e293b';
@@ -2350,65 +2739,71 @@ export default function GameCanvas({
           const isBlinking = p.isInvulnerable && p.invulnerableTime % 8 < 4;
           
           if (!isBlinking) {
-          ctx.save();
-          // Translate to player center to support rotation smoothly
-          ctx.translate(p.x, p.y);
-          ctx.rotate(p.angle);
+            ctx.save();
+            // Translate to player center to support rotation smoothly
+            ctx.translate(p.x, p.y);
+            ctx.rotate(p.angle);
 
-          // Add heavy plasma thrust glow
-          ctx.shadowBlur = 18;
-          ctx.shadowColor = stateRef.current.activePowerUp ? '#fbbf24' : '#38bdf8';
+            const playerImg = imagesRef.current.player_ship;
+            if (playerImg && playerImg.complete && playerImg.naturalWidth !== 0) {
+              const shipSize = p.radius * 2.5;
+              ctx.drawImage(playerImg, -shipSize / 2, -shipSize / 2, shipSize, shipSize);
+            } else {
+              // Add heavy plasma thrust glow (Vector Fallback)
+              ctx.shadowBlur = 4;
+              ctx.shadowColor = stateRef.current.activePowerUp ? '#fbbf24' : '#38bdf8';
 
-          // Body silhouette (Futuristic Stealth Fighter triangle)
-          ctx.fillStyle = '#0f172a';
-          ctx.strokeStyle = stateRef.current.activePowerUp ? '#fbbf24' : '#38bdf8';
-          ctx.lineWidth = 3;
+              // Body silhouette (Futuristic Stealth Fighter triangle)
+              ctx.fillStyle = '#0f172a';
+              ctx.strokeStyle = stateRef.current.activePowerUp ? '#fbbf24' : '#38bdf8';
+              ctx.lineWidth = 3;
 
-          ctx.beginPath();
-          // Nose tip
-          ctx.moveTo(p.radius + 4, 0);
-          // Left wing tail
-          ctx.lineTo(-p.radius, -p.radius);
-          // Left inner jet engine
-          ctx.lineTo(-p.radius + 6, -p.radius + 10);
-          // Right inner jet engine
-          ctx.lineTo(-p.radius + 6, p.radius - 10);
-          // Right wing tail
-          ctx.lineTo(-p.radius, p.radius);
-          ctx.closePath();
-          ctx.fill();
-          ctx.stroke();
+              ctx.beginPath();
+              // Nose tip
+              ctx.moveTo(p.radius + 4, 0);
+              // Left wing tail
+              ctx.lineTo(-p.radius, -p.radius);
+              // Left inner jet engine
+              ctx.lineTo(-p.radius + 6, -p.radius + 10);
+              // Right inner jet engine
+              ctx.lineTo(-p.radius + 6, p.radius - 10);
+              // Right wing tail
+              ctx.lineTo(-p.radius, p.radius);
+              ctx.closePath();
+              ctx.fill();
+              ctx.stroke();
 
-          // Fancy central glass cockpit
-          ctx.fillStyle = p.color || '#38bdf8';
-          ctx.beginPath();
-          ctx.moveTo(p.radius - 5, 0);
-          ctx.lineTo(-2, -6);
-          ctx.lineTo(-10, 0);
-          ctx.lineTo(-2, 6);
-          ctx.closePath();
-          ctx.fill();
+              // Fancy central glass cockpit
+              ctx.fillStyle = p.color || '#38bdf8';
+              ctx.beginPath();
+              ctx.moveTo(p.radius - 5, 0);
+              ctx.lineTo(-2, -6);
+              ctx.lineTo(-10, 0);
+              ctx.lineTo(-2, 6);
+              ctx.closePath();
+              ctx.fill();
 
-          // Left wing glow decal
-          ctx.strokeStyle = p.color || '#38bdf8';
-          ctx.lineWidth = 1.5;
-          ctx.beginPath();
-          ctx.moveTo(-5, -10);
-          ctx.lineTo(-p.radius + 3, -p.radius + 3);
-          ctx.stroke();
+              // Left wing glow decal
+              ctx.strokeStyle = p.color || '#38bdf8';
+              ctx.lineWidth = 1.5;
+              ctx.beginPath();
+              ctx.moveTo(-5, -10);
+              ctx.lineTo(-p.radius + 3, -p.radius + 3);
+              ctx.stroke();
 
-          // Right wing glow decal
-          ctx.beginPath();
-          ctx.moveTo(-5, 10);
-          ctx.lineTo(-p.radius + 3, p.radius - 3);
-          ctx.stroke();
+              // Right wing glow decal
+              ctx.beginPath();
+              ctx.moveTo(-5, 10);
+              ctx.lineTo(-p.radius + 3, p.radius - 3);
+              ctx.stroke();
+            }
 
-          ctx.restore();
+            ctx.restore();
 
           // Render active auxiliary shields
           if (p.isInvulnerable && p.invulnerableTime > 40) {
             ctx.save();
-            ctx.shadowBlur = 15;
+            ctx.shadowBlur = 3;
             ctx.shadowColor = '#c084fc';
             ctx.strokeStyle = 'rgba(192, 132, 252, 0.85)';
             ctx.lineWidth = 2.5;
@@ -2437,92 +2832,116 @@ export default function GameCanvas({
         ctx.translate(enemy.x, enemy.y);
         ctx.rotate(enemy.angle);
 
-        ctx.shadowBlur = 10;
+        ctx.shadowBlur = 2;
         ctx.shadowColor = enemy.color;
         ctx.strokeStyle = enemy.color;
         ctx.lineWidth = 2.5;
         // Deep body filling
         ctx.fillStyle = '#0f172a';
 
+        let enemyImgKey = '';
         if (enemy.type === 'kamikaze') {
-          // Yellow Aggressive spikes/blade shape
-          ctx.beginPath();
-          ctx.moveTo(enemy.radius + 6, 0);
-          ctx.lineTo(-enemy.radius, -enemy.radius);
-          ctx.lineTo(-enemy.radius + 4, 0);
-          ctx.lineTo(-enemy.radius, enemy.radius);
-          ctx.closePath();
-          ctx.fill();
-          ctx.stroke();
-
-          // Yellow core flame
-          ctx.fillStyle = '#eab308';
-          ctx.beginPath();
-          ctx.arc(-2, 0, 4, 0, Math.PI * 2);
-          ctx.fill();
-        } 
-        else if (enemy.type === 'evader') {
-          // Orange spinning shield disc vector
-          const ringAngle = (Date.now() / 150) % (Math.PI * 2);
-          ctx.fillStyle = '#1e1c2a';
-          ctx.beginPath();
-          ctx.arc(0, 0, enemy.radius, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
-
-          // Draw orbiting blades relative to body spinning angle
-          ctx.strokeStyle = '#f97316';
-          ctx.lineWidth = 2;
-          for (let i = 0; i < 4; i++) {
-            const spin = ringAngle + (i * Math.PI) / 2;
-            ctx.beginPath();
-            ctx.arc(0, 0, enemy.radius + 2, spin, spin + Math.PI / 5);
-            ctx.stroke();
-          }
-
-          // Small core eye
-          ctx.fillStyle = '#f97316';
-          ctx.beginPath();
-          ctx.arc(0, 0, 3, 0, Math.PI * 2);
-          ctx.fill();
-        } 
-        else if (enemy.type === 'ranger') {
-          // Purple heavy ship with dual-wing cannons
-          ctx.beginPath();
-          ctx.moveTo(enemy.radius + 3, 0);
-          ctx.lineTo(-enemy.radius + 2, -enemy.radius);
-          ctx.lineTo(-enemy.radius, -enemy.radius + 8);
-          ctx.lineTo(-4, 0);
-          ctx.lineTo(-enemy.radius, enemy.radius - 8);
-          ctx.lineTo(-enemy.radius + 2, enemy.radius);
-          ctx.closePath();
-          ctx.fill();
-          ctx.stroke();
-
-          // Draw dual side laser turrets
-          ctx.fillStyle = '#c084fc';
-          ctx.fillRect(2, -enemy.radius - 3, 6, 3);
-          ctx.fillRect(2, enemy.radius, 6, 3);
+          enemyImgKey = 'kamakze';
+        } else if (enemy.type === 'evader') {
+          enemyImgKey = 'evader';
+        } else if (enemy.type === 'ranger') {
+          enemyImgKey = 'ranger';
+        } else {
+          enemyImgKey = 'chaser';
         }
-        else { // Chaser standard bug fighter
-          ctx.beginPath();
-          // Bug claws
-          ctx.moveTo(enemy.radius + 2, 0);
-          ctx.lineTo(-enemy.radius + 2, -enemy.radius + 2);
-          ctx.lineTo(-enemy.radius, 0);
-          ctx.lineTo(-enemy.radius + 2, enemy.radius - 2);
-          ctx.closePath();
-          ctx.fill();
-          ctx.stroke();
 
-          // Glowing danger red core
-          ctx.fillStyle = '#ef4444';
-          ctx.beginPath();
-          ctx.moveTo(5, -2);
-          ctx.lineTo(5, 2);
-          ctx.lineTo(0, 0);
-          ctx.closePath();
-          ctx.fill();
+        const enemyImg = imagesRef.current[enemyImgKey];
+        if (enemyImg && enemyImg.complete && enemyImg.naturalWidth !== 0) {
+          const enemySize = enemy.radius * 2.5;
+          ctx.drawImage(enemyImg, -enemySize / 2, -enemySize / 2, enemySize, enemySize);
+        } else {
+          // Vector Fallback
+          ctx.shadowBlur = 2;
+          ctx.shadowColor = enemy.color;
+          ctx.strokeStyle = enemy.color;
+          ctx.lineWidth = 2.5;
+          ctx.fillStyle = '#0f172a';
+
+          if (enemy.type === 'kamikaze') {
+            // Yellow Aggressive spikes/blade shape
+            ctx.beginPath();
+            ctx.moveTo(enemy.radius + 6, 0);
+            ctx.lineTo(-enemy.radius, -enemy.radius);
+            ctx.lineTo(-enemy.radius + 4, 0);
+            ctx.lineTo(-enemy.radius, enemy.radius);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            // Yellow core flame
+            ctx.fillStyle = '#eab308';
+            ctx.beginPath();
+            ctx.arc(-2, 0, 4, 0, Math.PI * 2);
+            ctx.fill();
+          } 
+          else if (enemy.type === 'evader') {
+            // Orange spinning shield disc vector
+            const ringAngle = (Date.now() / 150) % (Math.PI * 2);
+            ctx.fillStyle = '#1e1c2a';
+            ctx.beginPath();
+            ctx.arc(0, 0, enemy.radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            // Draw orbiting blades relative to body spinning angle
+            ctx.strokeStyle = '#f97316';
+            ctx.lineWidth = 2;
+            for (let i = 0; i < 4; i++) {
+              const spin = ringAngle + (i * Math.PI) / 2;
+              ctx.beginPath();
+              ctx.arc(0, 0, enemy.radius + 2, spin, spin + Math.PI / 5);
+              ctx.stroke();
+            }
+
+            // Small core eye
+            ctx.fillStyle = '#f97316';
+            ctx.beginPath();
+            ctx.arc(0, 0, 3, 0, Math.PI * 2);
+            ctx.fill();
+          } 
+          else if (enemy.type === 'ranger') {
+            // Purple heavy ship with dual-wing cannons
+            ctx.beginPath();
+            ctx.moveTo(enemy.radius + 3, 0);
+            ctx.lineTo(-enemy.radius + 2, -enemy.radius);
+            ctx.lineTo(-enemy.radius, -enemy.radius + 8);
+            ctx.lineTo(-4, 0);
+            ctx.lineTo(-enemy.radius, enemy.radius - 8);
+            ctx.lineTo(-enemy.radius + 2, enemy.radius);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            // Draw dual side laser turrets
+            ctx.fillStyle = '#c084fc';
+            ctx.fillRect(2, -enemy.radius - 3, 6, 3);
+            ctx.fillRect(2, enemy.radius, 6, 3);
+          }
+          else { // Chaser standard bug fighter
+            ctx.beginPath();
+            // Bug claws
+            ctx.moveTo(enemy.radius + 2, 0);
+            ctx.lineTo(-enemy.radius + 2, -enemy.radius + 2);
+            ctx.lineTo(-enemy.radius, 0);
+            ctx.lineTo(-enemy.radius + 2, enemy.radius - 2);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            // Glowing danger red core
+            ctx.fillStyle = '#ef4444';
+            ctx.beginPath();
+            ctx.moveTo(5, -2);
+            ctx.lineTo(5, 2);
+            ctx.lineTo(0, 0);
+            ctx.closePath();
+            ctx.fill();
+          }
         }
 
         ctx.restore();
@@ -2548,23 +2967,36 @@ export default function GameCanvas({
       // F. Draw Bullets (lasers)
       bulletsRef.current.forEach((b) => {
         ctx.save();
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = b.color;
-        ctx.strokeStyle = b.color;
-        ctx.fillStyle = b.color;
-
-        // Custom linear streak laser render instead of naive circles
         const len = 12;
         const angle = Math.atan2(b.vy, b.vx);
 
         ctx.translate(b.x, b.y);
         ctx.rotate(angle);
 
-        ctx.lineWidth = b.radius;
-        ctx.beginPath();
-        ctx.moveTo(-len, 0);
-        ctx.lineTo(0, 0);
-        ctx.stroke();
+        let bulletImgKey = 'bullet_enemy';
+        if (b.isPlayer || b.isLocalPlayerBullet) {
+          bulletImgKey = 'bullet_player';
+        } else if (b.color === '#c084fc' || b.radius > 5) {
+          bulletImgKey = 'bullet_ranger';
+        }
+
+        const bImg = imagesRef.current[bulletImgKey];
+        if (bImg && bImg.complete && bImg.naturalWidth !== 0) {
+          // Use a size scaled to the bullet's collider radius
+          const bSize = b.radius * 4;
+          ctx.drawImage(bImg, -bSize / 2, -bSize / 2, bSize, bSize);
+        } else {
+          // Vector Fallback
+          ctx.shadowBlur = 2;
+          ctx.shadowColor = b.color;
+          ctx.strokeStyle = b.color;
+          ctx.fillStyle = b.color;
+          ctx.lineWidth = b.radius;
+          ctx.beginPath();
+          ctx.moveTo(-len, 0);
+          ctx.lineTo(0, 0);
+          ctx.stroke();
+        }
 
         ctx.restore();
       });
@@ -2572,10 +3004,6 @@ export default function GameCanvas({
       // G. Draw Particles (Debris explosion trails)
       particlesRef.current.forEach((p) => {
         ctx.save();
-        if (p.glow) {
-          ctx.shadowBlur = 8;
-          ctx.shadowColor = p.color;
-        }
         ctx.fillStyle = p.color;
         ctx.globalAlpha = p.alpha;
         ctx.beginPath();
@@ -2906,8 +3334,31 @@ export default function GameCanvas({
                 </div>
               </div>
 
-              {/* CENTER: ACTIVE POWER-UP INDICATOR */}
-              <div className="flex flex-col items-center">
+              {/* CENTER: ACTIVE POWER-UP INDICATOR & MATCHMAKING TIMER */}
+              <div className="flex flex-col items-center gap-2 pr-[16px] pt-[38px] pb-[4px] ml-0 mt-[3px]">
+                {lobbyMode === 'matchmaking_pvp' && (
+                  <div className="flex items-center gap-3 bg-slate-950/90 border border-cyan-500/30 rounded-2xl px-4 py-2 shadow-[0_4px_25px_rgba(6,182,212,0.2)] backdrop-blur-md">
+                    <Clock className="h-4 w-4 text-cyan-400 animate-pulse" />
+                    <div className="flex flex-col items-center">
+                      <span className="font-mono text-[8px] text-cyan-400 font-bold uppercase tracking-widest leading-none mb-0.5">
+                        TIME REMAINING
+                      </span>
+                      <span className="font-mono text-base font-black text-white tracking-widest leading-none">
+                        {Math.floor(matchmakingTimeLeft / 60)}:{String(matchmakingTimeLeft % 60).padStart(2, '0')}
+                      </span>
+                    </div>
+                    <div className="h-5 w-px bg-white/10 mx-1" />
+                    <div className="flex flex-col items-center">
+                      <span className="font-mono text-[8px] text-emerald-400 font-bold uppercase tracking-widest leading-none mb-0.5">
+                        KILLS
+                      </span>
+                      <span className="font-mono text-base font-black text-emerald-400 leading-none">
+                        {playerRef.current?.kills || 0}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
                 {stateRef.current.activePowerUp && (
                   <div className="flex items-center gap-2 bg-white/10 border border-amber-500/40 rounded-full px-4 py-1.5 shadow-lg backdrop-blur-md animate-bounce">
                     <Zap className="h-3.5 w-3.5 text-amber-500 animate-pulse" />
@@ -2967,6 +3418,27 @@ export default function GameCanvas({
                 >
                   <Settings className="h-5 w-5 animate-spin" style={{ animationDuration: '15s' }} />
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* MOLECULAR RECONSTRUCTION (RESPAWNING) HUD OVERLAY */}
+          {gameState === 'playing' && stateRef.current.respawnTimer > 0 && (
+            <div className="absolute inset-0 bg-[#020617]/85 backdrop-blur-md z-25 flex flex-col items-center justify-center pointer-events-none select-none">
+              <div className="animate-pulse flex flex-col items-center text-center p-6 sm:p-8 border border-rose-500/30 bg-rose-950/80 rounded-3xl shadow-[0_0_50px_rgba(244,63,94,0.4)] max-w-sm">
+                <div className="relative mb-4 flex items-center justify-center">
+                  <div className="absolute animate-ping h-12 w-12 rounded-full bg-rose-500/30" />
+                  <ShieldAlert className="h-10 w-10 text-rose-500 relative z-10" />
+                </div>
+                <h2 className="font-sans text-lg font-black text-rose-400 tracking-widest uppercase mb-1">
+                  SHIP DESTRUCTED
+                </h2>
+                <p className="font-sans text-[9px] text-slate-300 uppercase tracking-widest mb-4 font-bold">
+                  reconstructing hull & defensive array
+                </p>
+                <div className="font-mono text-3xl font-black text-white tracking-widest">
+                  {Math.ceil(stateRef.current.respawnTimer / 60)} SECONDS
+                </div>
               </div>
             </div>
           )}
@@ -3050,236 +3522,700 @@ export default function GameCanvas({
 
           {/* START OVERLAY VIEW SCREEN */}
           {gameState === 'start' && (
-            <div className="absolute inset-0 w-full h-full z-10 flex flex-col items-center justify-start bg-[#020617]/95 text-center p-3 sm:p-6 backdrop-blur-xl overflow-y-auto max-h-full pt-4 pb-8">
-              
-              {/* TAB SELECTION CONSOLE */}
-              <div className="flex bg-white/5 border border-white/10 rounded-2xl p-1 mb-3 sm:mb-6 gap-2 shrink-0">
-                <button
-                  onClick={() => setStartOverlayTab('home')}
-                  className={`px-4 sm:px-5 py-1.5 rounded-xl font-mono text-[9px] sm:text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all ${
-                    startOverlayTab === 'home' 
-                      ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/25' 
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                  id="tab-briefing"
-                >
-                  GAMING
-                </button>
-                <button
-                  onClick={() => {
-                    setStartOverlayTab('leaderboard');
-                    fetchLeaderboard();
-                  }}
-                  className={`px-4 sm:px-5 py-1.5 rounded-xl font-mono text-[9px] sm:text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all ${
-                    startOverlayTab === 'leaderboard' 
-                      ? 'bg-cyan-500 text-white shadow-md shadow-cyan-500/25' 
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                  id="tab-records"
-                >
-                  RECORDS
-                </button>
-              </div>
+            startOverlayTab === 'leaderboard' ? (
+              /* DEDICATED FULL-SCREEN RECORD PAGE (NO POP-UP, COMPLETELY SEPARATE VIEW) */
+              <div 
+                className="absolute inset-0 w-full h-full z-10 flex flex-col items-center justify-start p-3 sm:p-6 overflow-hidden"
+                style={{ backgroundImage: 'radial-gradient(circle at 50% 30%, #0c162d 0%, #030611 100%)' }}
+              >
+                {/* Header Row: Top Left: Back Button, Top Center: "Hall of Fame" with trophy icon (Reduced Size by 40%) */}
+                <div className="w-full max-w-md flex items-center justify-between mt-2 mb-4 relative shrink-0">
+                  
+                  {/* Top Left: "Back" Button */}
+                  <button
+                    onClick={() => setStartOverlayTab('home')}
+                    className="cursor-pointer bg-[#0c1a30]/75 hover:bg-[#152a46] border border-[#214A77] rounded-full px-3 py-1.5 flex items-center gap-1.5 text-white font-sans text-[10px] font-bold uppercase tracking-wider transition-all transform active:scale-95 shadow-md select-none z-10"
+                    id="btn-leaderboard-back"
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5 text-[#00d2ff]" />
+                    <span>Back</span>
+                  </button>
 
-              {startOverlayTab === 'home' ? (
-                <>
-                  <div className="relative mb-3 sm:mb-5 h-12 w-12 sm:h-16 sm:w-16 flex-shrink-0">
-                    <div className="absolute -inset-1 rounded-full bg-gradient-to-r from-cyan-500 to-indigo-500 opacity-75 blur animate-pulse" />
-                    <div className="relative flex h-full w-full items-center justify-center rounded-full bg-slate-950 border border-white/10">
-                      <Cpu className="h-5 w-5 sm:h-7 sm:w-7 text-cyan-400 animate-pulse" />
+                  {/* Top Center: "Hall of Fame" with trophy icon (Reduced size) */}
+                  <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-1.5 select-none whitespace-nowrap z-20">
+                    <Trophy className="h-4 w-4 text-amber-400 animate-bounce" />
+                    <h2 className="font-sans text-sm sm:text-base font-black tracking-[0.08em] text-white uppercase leading-none">
+                      HALL OF FAME
+                    </h2>
+                  </div>
+
+                  {/* Spacer to keep flex balance */}
+                  <div className="w-[58px]" />
+                </div>
+
+                {/* 10 Top Players List (Highly Compact, Optimized for Mobile Visibility) */}
+                <div className="w-full max-w-md bg-[#09152b]/85 border border-[#214A77]/30 rounded-2xl p-3 sm:p-4 shadow-2xl backdrop-blur-xl flex flex-col min-h-0 max-h-[72vh] sm:max-h-[440px] mb-3">
+                  {loadingLeaderboard ? (
+                    <div className="flex flex-col items-center justify-center py-10 flex-1">
+                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#00d2ff]" />
+                      <span className="text-[10px] text-slate-400 mt-3 font-mono uppercase tracking-widest animate-pulse">Syncing Hall of Fame...</span>
                     </div>
-                  </div>
-
-                  <h2 className="font-sans text-xl sm:text-3xl font-extrabold tracking-widest text-white uppercase mb-1 sm:mb-2 shrink-0">
-                    THE SPACE <span className="text-cyan-400">SHOOTER</span>
-                  </h2>
-                  <p className="font-sans text-[10px] sm:text-xs text-slate-300 max-w-xs sm:max-w-sm leading-normal sm:leading-relaxed mb-4 sm:mb-6 shrink-0">
-                    Evade incoming hostile swarm waves. Track alignment to point of intercept and incinerate targets.
-                  </p>
-
-                  {/* Start & Exit Game Action Panel */}
-                  <div className="flex flex-col sm:flex-row items-center gap-2 w-full max-w-2xl px-2 shrink-0">
-                    <button
-                      onClick={() => {
-                        requestAppFullscreen();
-                        startGame();
-                      }}
-                      className="group relative cursor-pointer font-extrabold w-full py-2.5 sm:py-3.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-white font-sans text-[10px] sm:text-[11px] uppercase tracking-widest shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-1.5"
-                      id="btn-start"
-                    >
-                      <Play className="h-3 w-3 fill-white" /> single
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        setLobbyMode('pvp');
-                        setShowInnerLobby(true);
-                      }}
-                      className="cursor-pointer font-extrabold w-full py-2.5 sm:py-3.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-white font-sans text-[10px] sm:text-[11px] uppercase tracking-widest shadow-[0_0_15px_rgba(239,68,68,0.1)] transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-1.5"
-                      id="btn-pvp-menu"
-                    >
-                      <Target className="h-3 w-3 text-red-400" /> PvP
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        setLobbyMode('coop');
-                        setShowInnerLobby(true);
-                      }}
-                      className="cursor-pointer font-extrabold w-full py-2.5 sm:py-3.5 px-4 rounded-xl border border-pink-500/20 bg-pink-950/20 hover:bg-pink-900/30 text-pink-300 font-sans text-[10px] sm:text-[11px] uppercase tracking-widest shadow-[0_0_15px_rgba(236,72,153,0.1)] transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-1.5"
-                      id="btn-coop-menu"
-                    >
-                      <Users className="h-3 w-3 text-pink-400" /> Play with Bro
-                    </button>
-
-                    {onExitBack && (
-                      <button
-                        onClick={handleCleanExit}
-                        className="cursor-pointer font-bold w-full py-2.5 sm:py-3.5 px-4 rounded-xl border border-white/5 bg-white/5 hover:bg-white/10 text-slate-400 font-sans text-[10px] sm:text-[11px] uppercase tracking-widest transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-1.5"
-                        id="btn-lobby-exit"
-                      >
-                        <Home className="h-3 w-3 text-slate-500" /> Exit
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Simple instructional cheat sheet */}
-                  <div className="grid grid-cols-2 gap-x-4 sm:gap-x-8 gap-y-1.5 sm:gap-y-2 mt-4 sm:mt-8 border-t border-white/10 pt-3 sm:pt-5 text-left max-w-sm w-full shrink-0">
-                    {isTouchCapable ? (
-                      <>
-                        <div className="flex items-center gap-1.5 text-slate-300 font-mono text-[9px] uppercase">
-                          <span className="bg-cyan-500/20 text-cyan-300 rounded-md border border-cyan-400/25 px-1.5 py-0.5 font-bold">L-THUMB</span>
-                          <span>Move Ship</span>
-                        </div>
-                        <div className="flex items-center gap-1.5 text-slate-300 font-mono text-[9px] uppercase">
-                          <span className="bg-cyan-500/20 text-cyan-300 rounded-md border border-cyan-400/25 px-1.5 py-0.5 font-bold">R-THUMB</span>
-                          <span>Aim / Shoot</span>
-                        </div>
-                        <div className="flex items-center gap-1.5 text-slate-300 font-mono text-[9px] uppercase">
-                          <span className="bg-cyan-500/20 text-cyan-300 rounded-md border border-cyan-400/25 px-1.5 py-0.5 font-bold">AUTO-AIM</span>
-                          <span>Target swarms</span>
-                        </div>
-                        <div className="flex items-center gap-1.5 text-slate-300 font-mono text-[9px] uppercase">
-                          <span className="bg-cyan-500/20 text-cyan-300 rounded-md border border-cyan-400/25 px-1.5 py-0.5 font-bold">PAUSE</span>
-                          <span>Top HUD-bar</span>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div className="flex items-center gap-2.5 text-slate-300 font-mono text-[10px] uppercase">
-                          <span className="bg-white/10 rounded-md border border-white/10 px-1.5 py-0.5 text-white font-bold">W A S D</span>
-                          <span>Flight Vectors</span>
-                        </div>
-                        <div className="flex items-center gap-2.5 text-slate-300 font-mono text-[10px] uppercase">
-                          <span className="bg-white/10 rounded-md border border-white/10 px-1.5 py-0.5 text-white font-bold">SPACE</span>
-                          <span>Fire Lasers</span>
-                        </div>
-                        <div className="flex items-center gap-2.5 text-slate-300 font-mono text-[10px] uppercase">
-                          <span className="bg-white/10 rounded-md border border-white/10 px-1.5 py-0.5 text-white font-bold">MOUSE</span>
-                          <span>Face Cursor</span>
-                        </div>
-                        <div className="flex items-center gap-2.5 text-slate-300 font-mono text-[10px] uppercase">
-                          <span className="bg-white/10 rounded-md border border-white/10 px-1.5 py-0.5 text-white font-bold">ESC / P</span>
-                          <span>Pause Game</span>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <>
-                  {/* WORLDWIDE LIVE LEADERBOARD SHOWCASE */}
-                  <div className="w-full max-w-md bg-white/5 border border-white/10 rounded-3xl p-5 shadow-2xl backdrop-blur-xl mb-6 flex flex-col items-center">
-                    <div className="flex items-center gap-2 mb-4">
-                      <Trophy className="h-5 w-5 text-amber-400 animate-pulse" />
-                      <h3 className="text-cyan-400 font-sans text-sm font-bold uppercase tracking-[0.2em]">
-                        GALACTIC HALL OF FAME
-                      </h3>
+                  ) : leaderboard.length === 0 ? (
+                    <div className="py-10 text-slate-400 font-mono text-[10px] uppercase text-center tracking-wider leading-relaxed flex-1 flex items-center justify-center">
+                      <span>NO RECORDS SYNCED YET.<br />BE THE FIRST PILOT OF THE SECTOR!</span>
                     </div>
-                    
-                    {loadingLeaderboard ? (
-                      <div className="flex flex-col items-center py-6">
-                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-cyan-400" />
-                        <span className="text-xs text-slate-400 mt-2 font-mono uppercase">SYNCING CORES...</span>
-                      </div>
-                    ) : leaderboard.length === 0 ? (
-                      <div className="py-8 text-slate-400 font-mono text-xs uppercase text-center">
-                        NO RECORDS SYNCED YET.<br />BE THE FIRST PILOT OF THE SECTOR!
-                      </div>
-                    ) : (
-                      <div className="w-full flex flex-col gap-1.5 max-h-[220px] overflow-y-auto pr-1">
-                        {leaderboard.map((entry, idx) => {
+                  ) : (
+                    <div className="w-full overflow-y-auto pr-1 flex-1 scrollbar-thin scrollbar-thumb-cyan-500/20 scrollbar-track-transparent">
+                      <div className="flex flex-col gap-1.5">
+                        {leaderboard.slice(0, 10).map((entry, idx) => {
                           const isSelf = auth.currentUser?.uid === entry.userId || getOrCreateVisitorId() === entry.userId;
                           const indexValue = idx + 1;
+                          
+                          const rankBackground = indexValue === 1
+                            ? 'bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-black shadow-[0_0_8px_rgba(245,158,11,0.4)]'
+                            : indexValue === 2
+                              ? 'bg-gradient-to-r from-slate-300 to-slate-400 text-slate-950 font-black shadow-[0_0_6px_rgba(203,213,225,0.25)]'
+                              : indexValue === 3
+                                ? 'bg-gradient-to-r from-orange-400 to-amber-600 text-slate-950 font-black shadow-[0_0_6px_rgba(251,146,60,0.25)]'
+                                : 'bg-[#102343] border border-[#1d355e] text-slate-300';
+
                           return (
                             <div 
                               key={entry.id || idx} 
-                              className={`flex items-center justify-between text-xs px-3 py-2 rounded-xl border ${
+                              className={`flex items-center justify-between text-[10px] sm:text-xs px-3 py-2 rounded-xl border transition-all ${
                                 isSelf 
-                                  ? 'bg-cyan-500/15 border-cyan-500/40' 
-                                  : 'bg-white/5 border-transparent hover:border-white/10'
-                              } transition-all`}
+                                  ? 'bg-[#00d2ff]/10 border-[#00d2ff]/30 shadow-[0_0_10px_rgba(0,210,255,0.1)]' 
+                                  : 'bg-[#050d1a]/80 border-[#142646] hover:border-[#00d2ff]/20'
+                              }`}
                             >
-                              <div className="flex items-center gap-3">
-                                <span className={`font-mono text-xs w-5 text-center font-bold ${
-                                  indexValue === 1 ? 'text-amber-400' : indexValue === 2 ? 'text-slate-300' : indexValue === 3 ? 'text-orange-400' : 'text-slate-500'
-                                }`}>
-                                  #{indexValue}
-                                </span>
+                              <div className="flex items-center gap-2.5">
+                                {/* Circle Rank Badges (Reduced to h-6 w-6) */}
+                                <div className={`h-6 w-6 rounded-full flex items-center justify-center font-mono text-[9px] ${rankBackground}`}>
+                                  {indexValue === 1 ? '🥇' : indexValue === 2 ? '🥈' : indexValue === 3 ? '🥉' : `#${indexValue}`}
+                                </div>
                                 
                                 {entry.socialUrl ? (
                                   <a 
                                     href={entry.socialUrl.startsWith('http') ? entry.socialUrl : `https://${entry.socialUrl}`}
                                     target="_blank" 
                                     rel="noopener noreferrer"
-                                    className="font-sans font-extrabold text-[#22d3ee] hover:text-[#e0f2fe] transition-colors flex items-center gap-1 hover:underline cursor-pointer"
-                                    title="Click to view pilot's neural profile"
+                                    className="font-sans font-extrabold text-[#00d2ff] hover:text-[#e0f2fe] transition-colors flex items-center gap-1 hover:underline cursor-pointer"
+                                    title="Click to view pilot neural link"
                                   >
-                                    {entry.playerName}
-                                    <Sparkles className="h-3 w-3 text-cyan-400 animate-spin" style={{ animationDuration: '4s' }} />
+                                    <span className="truncate max-w-[120px] sm:max-w-[160px]">{entry.playerName}</span>
+                                    <Sparkles className="h-2.5 w-2.5 text-cyan-400 animate-spin" style={{ animationDuration: '4s' }} />
                                   </a>
                                 ) : (
-                                  <span className="font-sans font-medium text-slate-200">
+                                  <span className={`font-sans font-bold text-slate-200 truncate max-w-[120px] sm:max-w-[160px] ${isSelf ? 'text-[#00d2ff]' : ''}`}>
                                     {entry.playerName}
                                   </span>
                                 )}
                               </div>
                               
-                              <span className="font-mono font-bold text-white tracking-wider">
-                                {entry.score} CR
-                              </span>
+                              <div className="flex items-center gap-1">
+                                <span className="font-mono font-extrabold text-white tracking-wider text-[11px] sm:text-xs">
+                                  {entry.score.toLocaleString()}
+                                </span>
+                                <span className="font-mono text-[8px] text-[#00d2ff] uppercase tracking-wider font-black">CR</span>
+                              </div>
                             </div>
                           );
                         })}
                       </div>
-                    )}
-                  </div>
-                  
-                  <button
-                    onClick={() => setStartOverlayTab('home')}
-                    className="cursor-pointer font-bold py-2.5 px-6 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-xs text-slate-300 uppercase tracking-widest transition-all"
+                    </div>
+                  )}
+                </div>
+
+                {/* Footer Links (Scaled smaller for perfect bottom safety margin) */}
+                <div className="mt-auto pt-2 flex gap-4 text-[9px] font-sans font-bold text-[#3b4e6b] tracking-[0.05em] shrink-0 z-20 select-none pb-2">
+                  <a 
+                    href="/privacy-policy"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:text-cyan-400 transition-colors uppercase cursor-pointer"
+                    id="leaderboard-btn-privacy"
                   >
-                    BACK TO GAMING
-                  </button>
-                </>
-              )}
+                    PRIVACY POLICY
+                  </a>
+                  <span className="text-[#1d2c42] font-light">|</span>
+                  <a 
+                    href="/term-conditions"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:text-cyan-400 transition-colors uppercase cursor-pointer"
+                    id="leaderboard-btn-terms"
+                  >
+                    TERMS & CONDITIONS
+                  </a>
+                </div>
+              </div>
+            ) : (
+              /* ORIGINAL START OVERLAY VIEW SCREEN */
+              <div 
+                className="absolute inset-0 w-full h-full z-10 flex flex-col items-center justify-center text-center p-3 sm:p-6 overflow-y-auto max-h-full pt-10 pb-10"
+                style={{ backgroundImage: 'radial-gradient(circle at 50% 30%, #0c162d 0%, #030611 100%)' }}
+              >
+                
+                {isMatchmaking && (
+                  <div className="absolute inset-0 bg-[#020617] z-50 flex items-center justify-center p-4">
+                    <div className="w-full h-full max-w-5xl max-h-[600px] relative border border-slate-900 bg-[#020617]/50 rounded-3xl overflow-hidden shadow-2xl backdrop-blur-sm">
+                      {/* Top Left CANCEL Button (styled like the outline box in the image) */}
+                      <button
+                        onClick={handleCancelMatchmaking}
+                        className="absolute top-6 left-6 cursor-pointer bg-slate-900/40 hover:bg-slate-800/60 transition-all border border-slate-700/50 rounded-xl px-5 py-2.5 flex items-center justify-center text-slate-300 hover:text-white font-sans text-[10px] tracking-widest font-extrabold uppercase shadow-lg select-none"
+                      >
+                        CANCEL
+                      </button>
+
+                      {/* YOU Circle (Upper-Left Region) */}
+                      <div className="absolute top-[20%] left-[10%] sm:left-[20%] flex flex-col items-center select-none">
+                        <div className="h-24 w-24 sm:h-36 sm:w-36 bg-gradient-to-r from-emerald-400 to-cyan-400 p-[3px] rounded-full shadow-[0_0_35px_rgba(52,211,153,0.3)] animate-pulse">
+                          <div className="bg-[#020617] rounded-full h-full w-full flex flex-col items-center justify-center relative">
+                            <div className="h-12 w-12 sm:h-20 sm:w-20 rounded-full bg-gradient-to-b from-cyan-400 to-blue-600 flex items-center justify-center shadow-inner">
+                              <User className="h-6 w-6 sm:h-12 sm:w-12 text-white fill-white/20" />
+                            </div>
+                          </div>
+                        </div>
+                        <span className="font-sans text-[9px] sm:text-[11px] text-emerald-400 font-black tracking-widest mt-3 uppercase">
+                          {pilotName || 'YOU (PILOT)'}
+                        </span>
+                      </div>
+                      {/* Short VS Tag */}
+                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 pointer-events-none select-none">
+                      <span className="font-sans font-black italic text-3xl sm:text-5xl text-sky-400 drop-shadow-[0_0_12px_rgba(56,189,248,0.8)] tracking-widest">VS
+                      </span>
+                      </div>
+
+                      {/* OPPONENTS Circle (Lower-Right Region) */}
+                      <div className="absolute bottom-[20%] right-[10%] sm:right-[20%] flex flex-col items-center select-none">
+                        <div className="h-24 w-24 sm:h-36 sm:w-36 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 p-[3px] rounded-full shadow-[0_0_35px_rgba(168,85,247,0.35)] animate-pulse">
+                          <div className="bg-[#020617] rounded-full h-full w-full flex flex-col items-center justify-center relative">
+                            <div className="relative h-12 w-12 sm:h-20 sm:w-20 flex items-center justify-center">
+                              {/* Left smaller user */}
+                              <div className="absolute left-0 bottom-0 sm:left-2 sm:bottom-2 h-5 w-5 sm:h-8 sm:w-8 rounded-full bg-slate-800 flex items-center justify-center scale-90 opacity-60">
+                                <User className="h-2.5 w-2.5 sm:h-4 sm:w-4 text-slate-400" />
+                              </div>
+                              {/* Center larger user */}
+                              <div className="relative z-10 h-8 w-8 sm:h-14 sm:w-14 rounded-full bg-gradient-to-b from-purple-500 to-indigo-600 flex items-center justify-center shadow-lg animate-pulse">
+                                <Users className="h-4 w-4 sm:h-7 sm:w-7 text-white fill-white/10" />
+                              </div>
+                              {/* Right smaller user */}
+                              <div className="absolute right-0 bottom-0 sm:right-2 sm:bottom-2 h-5 w-5 sm:h-8 sm:w-8 rounded-full bg-slate-800 flex items-center justify-center scale-90 opacity-60">
+                                <User className="h-2.5 w-2.5 sm:h-4 sm:w-4 text-slate-400" />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <span className="font-sans text-[9px] sm:text-[11px] text-purple-400 font-black tracking-widest mt-3 uppercase animate-pulse">
+                          {matchmakingStatusText.includes('LOCK') || matchmakingStatusText.includes('DIAGNOSTIC') ? 'OPFOR ACQUIRED' : 'SEEKING OPPONENT'}
+                        </span>
+                      </div>
+
+                      {/* Bottom Left: Status Text Panel */}
+                      <div className="absolute bottom-6 left-6 max-w-[150px] sm:max-w-md text-left select-none">
+                        <div className="font-mono text-[8px] text-slate-500 font-bold uppercase tracking-widest mb-1">
+                          SECTOR SEARCH COORDINATES
+                        </div>
+                        <div className="font-mono text-[9px] sm:text-xs text-cyan-300 font-black tracking-wider uppercase leading-relaxed animate-pulse">
+                          {matchmakingStatusText}
+                        </div>
+                      </div>
+
+                      {/* Bottom Right: Loading Indicator block (exactly like image) */}
+                      <div className="absolute bottom-6 right-6 flex flex-col items-end gap-1.5 sm:gap-3 select-none">
+                        <div className="flex gap-1 sm:gap-1.5 items-center">
+                          <span className="font-mono text-[8px] text-cyan-400 font-bold uppercase tracking-widest mr-1">
+                            SYNCING
+                          </span>
+                          <div className="h-1 w-1 sm:h-1.5 sm:w-1.5 rounded-full bg-cyan-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                          <div className="h-1 w-1 sm:h-1.5 sm:w-1.5 rounded-full bg-cyan-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                          <div className="h-1 w-1 sm:h-1.5 sm:w-1.5 rounded-full bg-cyan-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                        </div>
+                        
+                        <div className="relative h-6 w-6 sm:h-7 sm:w-7 flex items-center justify-center">
+                          <div className="absolute animate-spin rounded-full h-5 w-5 sm:h-6 sm:w-6 border-2 border-t-cyan-400 border-r-transparent border-b-cyan-500/20 border-l-cyan-500/10" style={{ animationDuration: '1s' }} />
+                          <div className="h-1 w-1 bg-cyan-400 rounded-full animate-ping" />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Conditional structure to support full-screen Levels selection or home screen briefing */}
+                {showLevelSelect ? (
+                  /* FULLSCREEN LEVEL SELECTION SCREEN AS PER Levels.svg (With beautiful sliding transition page 1-10 / 11-20) */
+                  <div className="w-full max-w-[400px] mx-auto flex flex-col items-center select-none p-4 bg-[#09152b]/60 border border-cyan-500/10 rounded-3xl shadow-2xl backdrop-blur-md overflow-hidden">
+                    
+                    {/* Header Row: Back button on Left, Levels badge mathematically centered */}
+                    <div className="w-full flex items-center justify-between mb-5 relative min-h-[32px]">
+                      
+                      {/* Back Button mimicking Levels.svg */}
+                      <button
+                        onClick={() => setShowLevelSelect(false)}
+                        className="flex items-center justify-center w-[58px] h-7 bg-[#111726]/80 hover:bg-[#1b233a] border border-[#2c3d59]/50 rounded-full text-cyan-400 transition-all shadow-md cursor-pointer z-10"
+                        id="btn-level-select-back"
+                        title="Return to Main Briefing"
+                      >
+                        <ChevronLeft className="h-4 w-4 text-cyan-400" />
+                      </button>
+
+                      {/* Glowing Capsule Pill (Mathematically Centered) mimicking Levels.svg */}
+                      <div className="absolute left-1/2 -translate-x-1/2 z-20">
+                        <div className="px-5 py-1.5 rounded-full bg-gradient-to-r from-cyan-400 to-[#00d2ff] shadow-[0_0_12px_rgba(6,182,212,0.8)] text-slate-950 font-sans font-black text-[9px] tracking-[0.2em] uppercase select-none w-24 text-center leading-none">
+                          LEVELS
+                        </div>
+                      </div>
+
+                      {/* Spacer to keep flex balance */}
+                      <div className="w-[58px]" />
+                    </div>
+
+                    {/* Sliding Pages Wrapper */}
+                    <div className="w-full overflow-hidden">
+                      <div 
+                        className="w-[200%] flex transition-transform duration-500 ease-in-out"
+                        style={{ transform: levelGroup === 1 ? 'translateX(0%)' : 'translateX(-50%)' }}
+                      >
+                        {/* PAGE 1: LEVELS 1-10 */}
+                        <div className="w-1/2 flex flex-col items-center px-2 mt-2">
+                          <div className="grid grid-cols-5 gap-2 w-full mb-4">
+                            {Array.from({ length: 10 }).map((_, index) => {
+                              const lvlNum = index + 1;
+                              const isUnlocked = lvlNum <= unlockedLevel;
+                              const isCurrentActive = lvlNum === unlockedLevel;
+                              const isBossLevel = lvlNum === 10;
+
+                              return (
+                                <button
+                                  key={lvlNum}
+                                  onClick={() => {
+                                    if (isUnlocked) {
+                                      requestAppFullscreen();
+                                      setSelectedLevel(lvlNum);
+                                      startGame(undefined, lvlNum, true);
+                                    }
+                                  }}
+                                  disabled={!isUnlocked}
+                                  className={`relative cursor-pointer aspect-square rounded-[12px] sm:rounded-[16px] flex items-center justify-center transition-all transform active:scale-95 duration-200 outline-none ${
+                                    isUnlocked
+                                      ? isCurrentActive
+                                        ? 'bg-gradient-to-b from-[#00f2fe] to-[#4facfe] border-[2px] border-white shadow-[0_0_12px_rgba(255,255,255,0.8),_0_0_10px_rgba(6,182,212,0.9)] scale-105 z-10'
+                                        : 'bg-gradient-to-b from-[#00d2ff] to-[#0072ff] hover:brightness-110 shadow-[0_0_10px_rgba(6,182,212,0.4)] border border-transparent'
+                                      : isBossLevel
+                                        ? 'bg-[#121626]/80 border-2 border-[#ef4444]/60 shadow-[0_0_10px_rgba(239,68,68,0.25)] text-[#ef4444] cursor-not-allowed'
+                                        : 'bg-[#121626]/80 border border-slate-800 text-[#3b4e6b] cursor-not-allowed'
+                                  }`}
+                                  id={`btn-select-level-${lvlNum}`}
+                                >
+                                  {isUnlocked ? (
+                                    <span className="font-sans font-black text-white text-[11px] sm:text-[13px] tracking-wider drop-shadow-sm select-none">
+                                      {lvlNum}
+                                    </span>
+                                  ) : (
+                                    <Lock className={`h-3 w-3 sm:h-3.5 sm:w-3.5 ${isBossLevel ? 'text-red-500 animate-pulse' : 'text-[#3b4e6b]'}`} />
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          {/* Navigation Button for Next 10 levels */}
+                          <div className="w-full flex justify-end px-1 mb-1">
+                            <button
+                              onClick={() => setLevelGroup(2)}
+                              className="cursor-pointer bg-[#0e1a32] hover:bg-[#15274b] border border-cyan-500/30 text-cyan-400 rounded-full px-3.5 py-1 flex items-center gap-1 text-[9px] font-sans font-extrabold uppercase tracking-wider transition-all shadow-[0_0_10px_rgba(6,182,212,0.15)] hover:shadow-[0_0_15px_rgba(6,182,212,0.3)]"
+                              id="btn-level-next"
+                            >
+                              <span>Next (11-20)</span>
+                              <Sparkles className="h-2.5 w-2.5 text-cyan-400" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* PAGE 2: LEVELS 11-20 */}
+                        <div className="w-1/2 flex flex-col items-center px-1">
+                          <div className="grid grid-cols-5 gap-2 w-full mb-4">
+                            {Array.from({ length: 10 }).map((_, index) => {
+                              const lvlNum = index + 11;
+                              const isUnlocked = lvlNum <= unlockedLevel;
+                              const isCurrentActive = lvlNum === unlockedLevel;
+                              const isBossLevel = lvlNum === 20;
+
+                              return (
+                                <button
+                                  key={lvlNum}
+                                  onClick={() => {
+                                    if (isUnlocked) {
+                                      requestAppFullscreen();
+                                      setSelectedLevel(lvlNum);
+                                      startGame(undefined, lvlNum, true);
+                                    }
+                                  }}
+                                  disabled={!isUnlocked}
+                                  className={`relative cursor-pointer aspect-square rounded-[12px] sm:rounded-[16px] flex items-center justify-center transition-all transform active:scale-95 duration-200 outline-none ${
+                                    isUnlocked
+                                      ? isCurrentActive
+                                        ? 'bg-gradient-to-b from-[#00f2fe] to-[#4facfe] border-[2px] border-white shadow-[0_0_12px_rgba(255,255,255,0.8),_0_0_10px_rgba(6,182,212,0.9)] scale-105 z-10'
+                                        : 'bg-gradient-to-b from-[#00d2ff] to-[#0072ff] hover:brightness-110 shadow-[0_0_10px_rgba(6,182,212,0.4)] border border-transparent'
+                                      : isBossLevel
+                                        ? 'bg-[#121626]/80 border-2 border-[#ef4444]/60 shadow-[0_0_10px_rgba(239,68,68,0.25)] text-[#ef4444] cursor-not-allowed'
+                                        : 'bg-[#121626]/80 border border-slate-800 text-[#3b4e6b] cursor-not-allowed'
+                                  }`}
+                                  id={`btn-select-level-${lvlNum}`}
+                                >
+                                  {isUnlocked ? (
+                                    <span className="font-sans font-black text-white text-[11px] sm:text-[13px] tracking-wider drop-shadow-sm select-none">
+                                      {lvlNum}
+                                    </span>
+                                  ) : (
+                                    <Lock className={`h-3 w-3 sm:h-3.5 sm:w-3.5 ${isBossLevel ? 'text-red-500 animate-pulse' : 'text-[#3b4e6b]'}`} />
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          {/* Navigation Button for Prev 10 levels */}
+                          <div className="w-full flex justify-start px-1 mb-1">
+                            <button
+                              onClick={() => setLevelGroup(1)}
+                              className="cursor-pointer bg-[#0e1a32] hover:bg-[#15274b] border border-cyan-500/30 text-cyan-400 rounded-full px-3.5 py-1 flex items-center gap-1 text-[9px] font-sans font-extrabold uppercase tracking-wider transition-all shadow-[0_0_10px_rgba(6,182,212,0.15)] hover:shadow-[0_0_15px_rgba(6,182,212,0.3)]"
+                              id="btn-level-prev"
+                            >
+                              <ChevronLeft className="h-3 w-3 text-cyan-400" />
+                              <span>Prev (1-10)</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                  </div>
+                ) : (
+                  <>
+                    {/* MAIN TITLE GROUP (Styled precisely like Sky.svg) */}
+                    <div className="flex flex-col items-center justify-center text-center mt-12 mb-2 select-none">
+                      <h1 className="font-sans text-[36px] sm:text-[44px] font-black tracking-widest uppercase leading-none">
+                        <span className="text-white">SKY WAR </span>
+                        <span className="text-[#00d2ff]">2D</span>
+                      </h1>
+                      <p className="font-sans text-[13px] sm:text-[14px] font-medium text-[#94a3b8] tracking-[0.05em] mt-2">
+                        The Space Shooter Arena
+                      </p>
+                    </div>
+
+                    {startOverlayTab === 'home' && (
+                      <>
+                        {/* Start & Action Panel */}
+                        {!showOnlineSelector ? (
+                          <div className="flex flex-col items-center w-full max-w-4xl px-4 shrink-0 mt-8 sm:mt-14">
+                            {/* 4 Column horizontal cards row (Sky.svg style layout) */}
+                            <div className="flex flex-row items-center justify-center gap-6 flex-wrap w-full mb-2 select-none">
+                              
+                              {/* 1. PLAY OFFLINE (Blue button with white Play icon) */}
+                              <button
+                                onClick={() => {
+                                  requestAppFullscreen();
+                                  startGame(undefined, undefined, false);
+                                }}
+                                className="group cursor-pointer w-[160px] h-[46px] rounded-[12px] bg-gradient-to-r from-[#00c6ff] to-[#0072ff] text-white transition-all duration-300 transform hover:scale-105 active:scale-95 flex items-center justify-center px-4 shadow-[0_6px_20px_rgba(0,114,255,0.45)] relative overflow-hidden"
+                                id="btn-start"
+                              >
+                                <svg className="h-4.5 w-4.5 fill-white text-white mr-2 filter drop-shadow-[0_1px_3px_rgba(0,0,0,0.25)]" viewBox="0 0 24 24">
+                                  <polygon points="6,4 6,20 20,12" />
+                                </svg>
+                                <span className="font-sans text-[12px] font-extrabold uppercase tracking-[0.05em] leading-none text-white">
+                                  PLAY OFFLINE
+                                </span>
+                              </button>
+
+                              {/* 2. PLAY ONLINE (Purple button with Gamepad controller icon) */}
+                              <button
+                                onClick={() => {
+                                  setShowOnlineSelector(true);
+                                }}
+                                className="group cursor-pointer w-[160px] h-[46px] rounded-[12px] bg-gradient-to-r from-[#8a23ff] to-[#5b11e8] text-white transition-all duration-300 transform hover:scale-105 active:scale-95 flex items-center justify-center px-4 shadow-[0_6px_20px_rgba(91,17,232,0.45)] relative overflow-hidden"
+                                id="btn-play-online"
+                              >
+                                <svg className="h-4.5 w-4.5 mr-2 filter drop-shadow-[0_1px_3px_rgba(0,0,0,0.25)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                                  <rect x="3" y="6" width="18" height="12" rx="3" />
+                                  <line x1="7" y1="12" x2="11" y2="12" />
+                                  <line x1="9" y1="10" x2="9" y2="14" />
+                                  <circle cx="15" cy="11" r="0.5" fill="currentColor" />
+                                  <circle cx="17" cy="13" r="0.5" fill="currentColor" />
+                                </svg>
+                                <span className="font-sans text-[12px] font-extrabold uppercase tracking-[0.05em] leading-none text-white">
+                                  PLAY ONLINE
+                                </span>
+                              </button>
+
+                              {/* 3. PLAY WITH BRO (Fuchsia outline button with outline Users icon) */}
+                              <button
+                                onClick={() => {
+                                  setLobbyMode('coop');
+                                  setShowInnerLobby(true);
+                                }}
+                                className="group cursor-pointer w-[160px] h-[46px] rounded-[12px] bg-[#13091e] border-[1.5px] border-[#3b114d] text-[#ff4181] hover:bg-[#1a0c29] transition-all duration-300 transform hover:scale-105 active:scale-95 flex items-center justify-center px-3 relative overflow-hidden"
+                                id="btn-coop-menu"
+                              >
+                                <svg className="h-4.5 w-4.5 mr-2 filter drop-shadow-[0_1px_3px_rgba(0,0,0,0.25)]" viewBox="0 0 24 24" fill="none" stroke="#ff4181" strokeWidth="1.6">
+                                  <path d="M4,17 C4,14 6,12 9,12 C12,12 14,14 14,17" />
+                                  <circle cx="9" cy="8" r="2.5" />
+                                  <path d="M12,17 C12,15.2 13.2,13.6 15.5,13.6 C17.8,13.6 19,15.2 19,17" opacity="0.7" />
+                                  <circle cx="15.5" cy="8.5" r="2" opacity="0.7" />
+                                </svg>
+                                <span className="font-sans text-[11.5px] font-extrabold uppercase tracking-[0.05em] leading-none text-[#ff4181]">
+                                  PLAY WITH BRO
+                                </span>
+                              </button>
+
+                              {/* 4. LEVELS (Green button with Trophy icon) */}
+                              <button
+                                onClick={() => {
+                                  setShowLevelSelect(true);
+                                }}
+                                className="group cursor-pointer w-[160px] h-[46px] rounded-[12px] bg-gradient-to-r from-[#00f5a0] to-[#00d97e] text-white transition-all duration-300 transform hover:scale-105 active:scale-95 flex items-center justify-center px-4 shadow-[0_6px_20px_rgba(0,217,126,0.45)] relative overflow-hidden"
+                                id="btn-start-levels"
+                              >
+                                <svg className="h-4.5 w-4.5 mr-2 filter drop-shadow-[0_1px_3px_rgba(0,0,0,0.25)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M6,4 L18,4 L18,9 C18,13 15.8,15 13,15 C10.2,15 8,13 8,9 Z" />
+                                  <path d="M6,7 L3,7 C2.2,7 1.5,7.7 1.5,8.5 C1.5,10 3,11.5 4.5,11.5 L6,11.5" />
+                                  <path d="M18,7 L21,7 C21.8,7 22.5,7.7 22.5,8.5 C22.5,10 21,11.5 19.5,11.5 L18,11.5" />
+                                  <line x1="12" y1="15" x2="12" y2="19" />
+                                  <line x1="8" y1="19" x2="16" y2="19" />
+                                </svg>
+                                <span className="font-sans text-[12px] font-extrabold uppercase tracking-[0.05em] leading-none text-white">
+                                  LEVELS
+                                </span>
+                              </button>
+
+                            </div>
+
+                            {/* Sleek bottom control deck (Leaderboard/Settings) matching Sky.svg perfectly */}
+                            <div className="mt-2 mb-2 flex items-center justify-center select-none shrink-0">
+                              <div className="w-[200px] h-[50px] bg-[#06152E] border border-[#214A77] rounded-[20px] flex items-center justify-between px-6 shadow-xl relative">
+                                
+                                {/* Left button: Leaderboard (🥇) */}
+                                <button
+                                  onClick={() => {
+                                    setStartOverlayTab('leaderboard');
+                                    fetchLeaderboard();
+                                  }}
+                                  className="h-10 w-10 rounded-full bg-[#102F59] hover:bg-[#153a6c] flex items-center justify-center transition-all duration-300 transform active:scale-90"
+                                  title="Toggle Records Leaderboard"
+                                >
+                                  <span className="text-[20px] leading-none filter drop-shadow-[0_1px_3px_rgba(0,0,0,0.3)]">🥇</span>
+                                </button>
+
+                                {/* Spacer / divider */}
+                                <div className="h-0.5 w-6 bg-[#214A77]/40 rounded-full" />
+
+                                {/* Right button: Settings (⚙) */}
+                                <button
+                                  onClick={() => {
+                                    setShowSettingsModal(true);
+                                  }}
+                                  className={`h-10 w-10 rounded-full bg-[#102F59] hover:bg-[#153a6c] flex items-center justify-center transition-all duration-300 transform active:scale-90 ${
+                                    showSettingsModal ? 'bg-[#1b4377]' : ''
+                                  }`}
+                                  title="Edit Profile & Configure Keys"
+                                >
+                                  <span className="text-[22px] leading-none text-[#A9C7E8] filter drop-shadow-[0_1px_3px_rgba(0,0,0,0.3)] select-none">⚙</span>
+                                </button>
+
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col sm:flex-row items-center gap-4 w-full max-w-2xl px-4 shrink-0 select-none mt-14 sm:mt-24">
+                            <button
+                              onClick={handleStartMatchmaking}
+                              className="group relative cursor-pointer font-extrabold w-full py-3 px-5 rounded-[18px] bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-white font-sans text-[10px] sm:text-[11px] uppercase tracking-widest shadow-[0_0_20px_rgba(245,158,11,0.35)] transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-1.5"
+                              id="btn-matchmaking-1v1"
+                            >
+                              <Zap className="h-3 w-3 text-yellow-300 animate-bounce" />Auto Matchmaking
+                            </button>
+
+                            <button
+                              onClick={() => {
+                                setLobbyMode('pvp');
+                                setShowInnerLobby(true);
+                              }}
+                              className="group relative cursor-pointer font-extrabold w-full py-3 px-5 rounded-[18px] bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-white font-sans text-[10px] sm:text-[11px] uppercase tracking-widest shadow-[0_0_20px_rgba(6,182,212,0.35)] transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-1.5"
+                              id="btn-pvp-custom-room"
+                            >
+                              <Target className="h-3 w-3 text-red-400" /> Custom PvP Room
+                            </button>
+
+                            <button
+                              onClick={() => setShowOnlineSelector(false)}
+                              className="cursor-pointer font-bold w-full py-3 px-5 rounded-[18px] border border-white/5 bg-white/5 hover:bg-white/10 text-slate-400 font-sans text-[10px] sm:text-[11px] uppercase tracking-widest transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-1.5"
+                              id="btn-online-back"
+                            >
+                              <ChevronLeft className="h-3.5 w-3.5 text-slate-500" /> Back
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </>
+                )}
+
+                {/* FOOTER LINKS (styled exactly like Sky.svg footer links) */}
+                <div className="mt-auto mb-10px pt-6 flex gap-4 text-[10px] font-sans font-bold text-[#3b4e6b] tracking-[0.1em] shrink-0 z-20 select-none">
+                  <a 
+                    href="/privacy-policy"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:text-cyan-400 transition-colors uppercase cursor-pointer"
+                    id="game-btn-privacy"
+                  >
+                    PRIVACY POLICY
+                  </a>
+                  <span className="text-[#1d2c42] font-light">|</span>
+                  <a 
+                    href="/term-conditions"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:text-cyan-400 transition-colors uppercase cursor-pointer"
+                    id="game-btn-terms"
+                  >
+                    TERMS & CONDITIONS
+                  </a>
+                </div>
+
+              </div>
+            )
+          )}
+
+          {/* PILOT PROFILE CUSTOMIZATION MODAL (⚙ Triggered from Sky.svg control deck) */}
+          {showSettingsModal && (
+            <div className="absolute inset-0 z-50 bg-[#020617]/95 flex items-center justify-center p-4 backdrop-blur-md">
+              <div className="w-full max-w-800 h-full max-h-500 bg-[#09152b] border border-cyan-500/20 rounded-3xl pt-20 pb-6 px-6 shadow-2xl relative">
+                
+                {/* Back Button (Top Left) */}
+                <button
+                  onClick={() => setShowSettingsModal(false)}
+                  className="absolute left-6 top-6 flex items-center justify-center gap-1 w-20 h-9 bg-[#111726]/80 hover:bg-[#1b233a] border border-[#2c3d59]/50 rounded-full text-cyan-400 font-mono text-[10px] uppercase font-bold tracking-wider transition-all shadow-md cursor-pointer z-50"
+                  id="btn-settings-back"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  <span>BACK</span>
+                </button>
+
+                {/* System Setting Top Center */}
+                <div className="absolute top-8 left-1/2 -translate-x-1/2 z-10 text-center">
+                  <h3 className="font-sans text-[15px] font-black tracking-widest text-white uppercase whitespace-nowrap">
+                    SYSTEM SETTING
+                  </h3>
+                </div>
+
+                {/* Input block */}
+                <div className="space-y-5 text-left">
+                  
+                  {/* Pilot NickName Input */}
+                  <div>
+                    <label className="block font-mono text-[9px] text-cyan-400 font-bold uppercase tracking-widest mb-1">
+                      Pilot NickName
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={15}
+                      value={pilotName}
+                      onChange={(e) => {
+                        const val = e.target.value.toUpperCase();
+                        setPilotName(val);
+                        try {
+                          localStorage.setItem('sky_war_pilot_name', val);
+                        } catch {}
+                      }}
+                      className="w-full bg-slate-950/80 border border-slate-800 focus:border-cyan-500 rounded-xl px-4 py-2.5 text-white font-sans font-bold uppercase text-xs tracking-wider outline-none transition-all"
+                      placeholder="ENTER NICKNAME..."
+                    />
+                  </div>
+
+                  {/* COCKPIT AUDIO SYSTEMS (Music and Sound Effects On/Off) */}
+                  <div>
+                    <label className="block font-mono text-[9px] text-cyan-400 font-bold uppercase tracking-widest mb-1.5">
+                      GAME AUDIO SYSTEMS
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      
+                      {/* Music On/Off */}
+                      <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3 flex flex-col justify-between gap-3 text-left">
+                        <div className="flex flex-col">
+                          <span className="font-sans font-black text-[10px] text-slate-200 uppercase tracking-wider">BACKGROUND MUSIC</span>
+                        </div>
+                        <button
+                          onClick={() => {
+                            const nextVal = !musicEnabled;
+                            setMusicEnabled(nextVal);
+                            audio.setMusicEnabled(nextVal);
+                          }}
+                          className={`cursor-pointer w-full py-2.5 rounded-lg font-mono text-[10px] font-black uppercase tracking-wider transition-all border text-center ${
+                            musicEnabled
+                              ? 'bg-cyan-950/40 text-cyan-400 border-cyan-500/40 shadow-[0_0_12px_rgba(6,182,212,0.2)]'
+                              : 'bg-slate-900/60 text-slate-500 border-slate-800'
+                          }`}
+                        >
+                          {musicEnabled ? 'MUSIC: ON' : 'MUSIC: OFF'}
+                        </button>
+                      </div>
+
+                      {/* Sound Effect On/Off */}
+                      <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3 flex flex-col justify-between gap-3 text-left">
+                        <div className="flex flex-col">
+                          <span className="font-sans font-black text-[10px] text-slate-200 uppercase tracking-wider">SOUND EFFECTS</span>
+    
+                        </div>
+                        <button
+                          onClick={() => {
+                            const nextVal = !soundEnabled;
+                            setSoundEnabled(nextVal);
+                            audio.setSoundEnabled(nextVal);
+                          }}
+                          className={`cursor-pointer w-full py-2.5 rounded-lg font-mono text-[10px] font-black uppercase tracking-wider transition-all border text-center ${
+                            soundEnabled
+                              ? 'bg-emerald-950/40 text-emerald-400 border-emerald-500/40 shadow-[0_0_12px_rgba(16,185,129,0.2)]'
+                              : 'bg-slate-900/60 text-slate-500 border-slate-800'
+                          }`}
+                        >
+                          {soundEnabled ? 'SOUND: ON' : 'SOUND: OFF'}
+                        </button>
+                      </div>
+
+                    </div>
+                  </div>
+
+                
+                </div>
+
+              </div>
             </div>
           )}
 
           {/* INNER CO-OP/PVP LOBBY OVERLAY MODAL */}
           {showInnerLobby && (
-            <div className="absolute inset-0 z-40 bg-[#020617] overflow-y-auto flex flex-col items-center justify-center p-3 sm:p-6 backdrop-blur-xl">
+            <div className="absolute inset-0 z-40 bg-[#020617] overflow-y-auto flex flex-col items-center justify-center p-3 sm:p-6">
               <div className="w-full max-w-4xl">
                 <MultiplayerLobby
                   initialPilotName={pilotName}
                   lobbyMode={lobbyMode}
-                  onLaunchMultiplayer={(roomId, myId, isHost) => {
+                  onLaunchMultiplayer={(roomId, myId, isHost, gameMode) => {
+                    const actualMode = gameMode || lobbyMode;
+                    setLobbyMode(actualMode);
                     setLocalRoomId(roomId);
                     setLocalMyId(myId);
                     setLocalIsHost(isHost);
+                    activeRoomIdRef.current = roomId;
+                    activeMyIdRef.current = myId;
+                    activeIsHostRef.current = isHost;
                     setShowInnerLobby(false);
                     requestAppFullscreen();
-                    startGame();
+                    
+                    // Synchronously set stateRef.current.roomGameMode so it is immediately correct in startGame()!
+                    stateRef.current.roomGameMode = actualMode;
+                    startGame(actualMode);
                   }}
                   onBack={() => {
                     setShowInnerLobby(false);
@@ -3291,7 +4227,7 @@ export default function GameCanvas({
 
           {/* PAUSED GAME STATE SCREEN & WEAPON DATABASE */}
           {gameState === 'paused' && (
-            <div className="absolute inset-0 z-30 flex flex-col justify-start bg-slate-950/95 p-4 sm:p-6 md:p-8 backdrop-blur-2xl overflow-y-auto max-h-full">
+            <div className="absolute inset-0 z-30 flex flex-col justify-start bg-[#020617] p-4 sm:p-6 md:p-8 overflow-y-auto max-h-full">
               
               {/* HEADER CONSOLE */}
               <div className="flex flex-col sm:flex-row justify-between items-center border-b border-cyan-500/20 pb-4 mb-6 gap-3 shrink-0">
@@ -3504,9 +4440,86 @@ export default function GameCanvas({
             </div>
           )}
 
+          {/* LEVEL VICTORY STATE VIEW SCREEN */}
+          {gameState === 'victory' && (
+            <div className="absolute inset-0 w-full h-full z-30 flex flex-col items-center justify-center bg-[#020617] text-center p-4 sm:p-6 overflow-y-auto max-h-full pt-4 pb-8">
+              <div className="relative mb-4 flex flex-col items-center animate-bounce">
+                <div className="h-16 w-16 flex items-center justify-center rounded-full mb-2 bg-emerald-950/80 border border-emerald-400 text-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.4)]">
+                  <Trophy className="h-9 w-9 animate-pulse" />
+                </div>
+                <span className="font-mono text-[10px] font-bold tracking-[0.3em] uppercase text-emerald-400">
+                  SECTOR SECURED
+                </span>
+              </div>
+
+               <h2 className="font-sans text-3xl font-black tracking-widest uppercase mb-1 text-emerald-400">
+                {waveNum === 20 ? "CAMPAIGN CONQUERED" : "LEVEL COMPLETED"}
+              </h2>
+              <p className="font-sans text-xs text-slate-300 max-w-sm mb-6 uppercase tracking-wider font-semibold">
+                {waveNum === 20 
+                  ? "🎉 ABSOLUTELY INCREDIBLE! YOU HAVE COMPLETELY SECTOR-CLEARED ALL 20 SECTORS OF THE SKY WAR CAMPAIGN!" 
+                  : `You have neutralized all hostile swarms in Level ${waveNum}!`}
+              </p>
+
+              {/* Status indicators */}
+              <div className="flex gap-4 mb-8 bg-slate-950/80 border border-emerald-500/20 rounded-2xl p-4 min-w-[300px] justify-around shadow-lg backdrop-blur-md">
+                <div className="flex flex-col items-center">
+                  <span className="font-mono text-[9px] text-slate-400 uppercase tracking-widest font-bold mb-1">Credits</span>
+                  <span className="font-mono text-lg font-extrabold text-[#38bdf8]">{score}</span>
+                </div>
+                <div className="flex flex-col items-center border-l border-white/15 pl-4">
+                  <span className="font-mono text-[9px] text-slate-400 uppercase tracking-widest font-bold mb-1">Level Cleared</span>
+                  <span className="font-mono text-lg font-extrabold text-emerald-400">#{waveNum}</span>
+                </div>
+                <div className="flex flex-col items-center border-l border-white/15 pl-4">
+                  <span className="font-mono text-[9px] text-slate-400 uppercase tracking-widest font-bold mb-1">Enemies Vaporized</span>
+                  <span className="font-mono text-lg font-extrabold text-rose-400">{enemiesKilled}</span>
+                </div>
+              </div>
+
+              {/* "back to menu | play again | Next Level" buttons */}
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-3 w-full max-w-md">
+                <button
+                  onClick={handleExitMatch}
+                  className="cursor-pointer font-extrabold w-full py-3 px-6 rounded-xl border border-white/10 bg-white/5 hover:bg-white/15 text-slate-300 font-sans text-xs uppercase tracking-widest transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-2"
+                  id="btn-victory-back"
+                >
+                  <Home className="h-4 w-4 text-slate-300" /> Back to Menu
+                </button>
+
+                <button
+                  onClick={() => {
+                    requestAppFullscreen();
+                    startGame(undefined, waveNum, true);
+                  }}
+                  className="cursor-pointer font-extrabold w-full py-3 px-6 rounded-xl border border-emerald-500/20 bg-emerald-950/30 hover:bg-emerald-900/40 text-emerald-300 font-sans text-xs uppercase tracking-widest transition-all transform hover:scale-105 active:scale-95 flex items-center justify-center gap-2"
+                  id="btn-victory-replay"
+                >
+                  <RotateCcw className="h-4 w-4 text-emerald-300" /> Play Again
+                </button>
+
+                {waveNum < 20 && (
+                  <button
+                    onClick={() => {
+                      requestAppFullscreen();
+                      // Play next level
+                      const nextLvl = waveNum + 1;
+                      setSelectedLevel(nextLvl);
+                      startGame(undefined, nextLvl, true);
+                    }}
+                    className="cursor-pointer font-extrabold w-full py-3 px-6 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-sans text-xs uppercase tracking-widest shadow-[0_0_20px_rgba(16,185,129,0.3)] transform hover:scale-105 active:scale-95 transition-all flex items-center justify-center gap-2"
+                    id="btn-victory-next"
+                  >
+                    <Play className="h-4 w-4 fill-white text-white" /> Next Level
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* GAME OVER STATE VIEW SCREEN */}
           {gameState === 'gameover' && (
-            <div className="absolute inset-0 w-full h-full z-30 flex flex-col items-center justify-start bg-[#020617]/90 text-center p-4 sm:p-6 backdrop-blur-xl overflow-y-auto max-h-full pt-4 pb-8">
+            <div className="absolute inset-0 w-full h-full z-30 flex flex-col items-center justify-start bg-[#020617] text-center p-4 sm:p-6 overflow-y-auto max-h-full pt-4 pb-8">
               <div className="relative mb-4 flex flex-col items-center animate-pulse">
                 <div className={`h-14 w-14 flex items-center justify-center rounded-full mb-2 ${
                   multiplayerWon 
@@ -3518,35 +4531,62 @@ export default function GameCanvas({
                 <span className={`font-mono text-[9px] font-bold tracking-[0.3em] uppercase ${
                   multiplayerWon ? "text-emerald-400" : "text-rose-400"
                 }`}>
-                  {multiplayerWon ? "MISSION SUCCESS - SECURED SECTOR" : "SHIELD DEPLETED - CHIP FAILURE"}
+                  {lobbyMode === 'matchmaking_pvp'
+                    ? (multiplayerWon ? "BATTLE DOMINATED - VICTORY SECURED" : "CONFLICT CONCLUDED - PILOT DEFEATED")
+                    : (multiplayerWon ? "MISSION SUCCESS - SECURED SECTOR" : "SHIELD DEPLETED - CHIP FAILURE")}
                 </span>
               </div>
 
               <h2 className={`font-sans text-2xl font-black tracking-widest uppercase mb-2 ${
                 multiplayerWon ? "text-emerald-400" : "text-rose-500"
               }`}>
-                {multiplayerWon ? "VICTORY" : "GAME OVER"}
+                {lobbyMode === 'matchmaking_pvp'
+                  ? (multiplayerWon ? "MATCH VICTOR" : "MATCH DEFEAT")
+                  : (multiplayerWon ? "VICTORY" : "GAME OVER")}
               </h2>
               <p className="font-sans text-xs text-slate-300 max-w-sm mb-6">
-                {multiplayerWon 
-                  ? "Your opponent has left or has been vaporized in the duel. You emerge victorious!" 
-                  : "Sector security has fallen. Spacecraft engine parameters critical."}
+                {lobbyMode === 'matchmaking_pvp'
+                  ? (multiplayerWon 
+                      ? (stateRef.current.matchmakingTimeLeft > 0 
+                          ? "Adversary has dropped out of the battle grid. Victory has been awarded to you by tactical forfeit!"
+                          : "Congratulations Pilot! You secured the battlefield by outperforming the adversary.")
+                      : `Adversary ${matchmakingWinnerName || 'Opponent'} has secured more tactical kills. Practice flight sequences and rebuild hulls.`)
+                  : (multiplayerWon 
+                      ? "Your opponent has left or has been vaporized in the duel. You emerge victorious!" 
+                      : "Sector security has fallen. Spacecraft engine parameters critical.")}
               </p>
 
-              {/* End status indicators (score and wave survived) */}
+              {/* End status indicators (score and wave survived or matchmaking kills) */}
               <div className="flex gap-4 mb-3 sm:mb-6 bg-white/5 border border-white/10 rounded-2xl p-2.5 sm:p-4 min-w-[280px] sm:min-w-[320px] justify-around shadow-lg backdrop-blur-md">
-                <div className="flex flex-col items-center">
-                  <span className="font-mono text-[9px] text-slate-400 uppercase tracking-widest font-bold mb-1">Credits</span>
-                  <span className="font-mono text-lg font-extrabold text-[#38bdf8]">{score}</span>
-                </div>
-                <div className="flex flex-col items-center border-l border-white/15 pl-4">
-                  <span className="font-mono text-[9px] text-slate-400 uppercase tracking-widest font-bold mb-1">Max Wave</span>
-                  <span className="font-mono text-lg font-extrabold text-[#f97316]">#{waveNum}</span>
-                </div>
-                <div className="flex flex-col items-center border-l border-white/15 pl-4">
-                  <span className="font-mono text-[9px] text-slate-400 uppercase tracking-widest font-bold mb-1">Swarm Kills</span>
-                  <span className="font-mono text-lg font-extrabold text-rose-400">{enemiesKilled}</span>
-                </div>
+                {lobbyMode === 'matchmaking_pvp' ? (
+                  <>
+                    <div className="flex flex-col items-center">
+                      <span className="font-mono text-[9px] text-slate-400 uppercase tracking-widest font-bold mb-1">Your Kills</span>
+                      <span className="font-mono text-xl font-black text-emerald-400">{playerRef.current.kills || 0}</span>
+                    </div>
+                    <div className="flex flex-col items-center border-l border-white/15 pl-4">
+                      <span className="font-mono text-[9px] text-slate-400 uppercase tracking-widest font-bold mb-1">Opponent Kills</span>
+                      <span className="font-mono text-xl font-black text-rose-400">
+                        {Object.values(remotePlayers).reduce((acc: number, rp: any) => acc + (rp.kills || 0), 0)}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex flex-col items-center">
+                      <span className="font-mono text-[9px] text-slate-400 uppercase tracking-widest font-bold mb-1">Credits</span>
+                      <span className="font-mono text-lg font-extrabold text-[#38bdf8]">{score}</span>
+                    </div>
+                    <div className="flex flex-col items-center border-l border-white/15 pl-4">
+                      <span className="font-mono text-[9px] text-slate-400 uppercase tracking-widest font-bold mb-1">Max Wave</span>
+                      <span className="font-mono text-lg font-extrabold text-[#f97316]">#{waveNum}</span>
+                    </div>
+                    <div className="flex flex-col items-center border-l border-white/15 pl-4">
+                      <span className="font-mono text-[9px] text-slate-400 uppercase tracking-widest font-bold mb-1">Swarm Kills</span>
+                      <span className="font-mono text-lg font-extrabold text-rose-400">{enemiesKilled}</span>
+                    </div>
+                  </>
+                )}
               </div>
 
               {/* SCORE SUBMISSION SYSTEM (Firebase Live) - HIDE IN MULTIPLAYER */}
@@ -3761,6 +4801,30 @@ export default function GameCanvas({
                   </>
                 )}
               </div>
+
+              {/* LEGAL PRIVACY AND TERMS LINKS */}
+              <div className="mt-auto pt-6 flex gap-4 text-[9px] font-mono text-slate-500 tracking-wider shrink-0 z-20">
+                <a 
+                  href="/privacy-policy"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-cyan-400 transition-colors uppercase font-bold cursor-pointer"
+                  id="gameover-btn-privacy"
+                >
+                  PRIVACY POLICY
+                </a>
+                <span className="text-slate-700">|</span>
+                <a 
+                  href="/term-conditions"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-cyan-400 transition-colors uppercase font-bold cursor-pointer"
+                  id="gameover-btn-terms"
+                >
+                  TERMS & CONDITIONS
+                </a>
+              </div>
+
             </div>
           )}
 
@@ -3860,6 +4924,7 @@ export default function GameCanvas({
               </div>
             </div>
           )}
+
         </div>
       </div>
     );

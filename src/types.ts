@@ -85,7 +85,7 @@ export interface PowerUp {
   duration: number;
 }
 
-export type GameStateStatus = 'start' | 'playing' | 'paused' | 'gameover';
+export type GameStateStatus = 'start' | 'playing' | 'paused' | 'gameover' | 'victory';
 
 export interface Wave {
   number: number;

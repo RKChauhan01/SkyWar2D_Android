@@ -5,7 +5,27 @@
 
 class SoundController {
   private ctx: AudioContext | null = null;
-  private muted: boolean = false;
+  private soundEnabled: boolean = true;
+  private musicEnabled: boolean = true;
+  private musicInterval: any = null;
+  private isMusicPlaying: boolean = false;
+  private currentNotes: number[] = [110, 130.81, 146.83, 164.81, 110, 130.81, 164.81, 196.00]; // A2, C3, D3, E3, G3
+  private musicStep: number = 0;
+
+  constructor() {
+    try {
+      const storedSound = localStorage.getItem('sky_war_sound_enabled');
+      if (storedSound !== null) {
+        this.soundEnabled = storedSound === 'true';
+      }
+      const storedMusic = localStorage.getItem('sky_war_music_enabled');
+      if (storedMusic !== null) {
+        this.musicEnabled = storedMusic === 'true';
+      }
+    } catch (e) {
+      console.warn("Storage access failed in sound controller", e);
+    }
+  }
 
   private init() {
     if (this.ctx) return;
@@ -18,11 +38,109 @@ class SoundController {
   }
 
   public setMuted(muted: boolean) {
-    this.muted = muted;
+    this.setSoundEnabled(!muted);
+    this.setMusicEnabled(!muted);
   }
 
   public isMuted(): boolean {
-    return this.muted;
+    return !this.soundEnabled && !this.musicEnabled;
+  }
+
+  public setSoundEnabled(enabled: boolean) {
+    this.soundEnabled = enabled;
+    try {
+      localStorage.setItem('sky_war_sound_enabled', String(enabled));
+    } catch {}
+  }
+
+  public setMusicEnabled(enabled: boolean) {
+    this.musicEnabled = enabled;
+    try {
+      localStorage.setItem('sky_war_music_enabled', String(enabled));
+    } catch {}
+    if (enabled) {
+      this.startMusic();
+    }
+  }
+
+  public isSoundEnabled(): boolean {
+    return this.soundEnabled;
+  }
+
+  public isMusicEnabled(): boolean {
+    return this.musicEnabled;
+  }
+
+  public startMusic() {
+    if (this.isMusicPlaying) return;
+    this.init();
+    if (!this.ctx) return;
+    this.isMusicPlaying = true;
+    this.musicStep = 0;
+
+    const playStep = () => {
+      if (!this.isMusicPlaying || !this.ctx) return;
+      
+      if (this.ctx.state === 'suspended') {
+        try {
+          this.ctx.resume();
+        } catch {}
+      }
+
+      if (!this.musicEnabled) {
+        this.musicInterval = setTimeout(playStep, 420);
+        return;
+      }
+
+      const t = this.ctx.currentTime;
+      const note = this.currentNotes[this.musicStep % this.currentNotes.length];
+      
+      try {
+        // Deep warm triangle wave synth bass beat
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(note, t);
+        
+        // Syncopated high-pitch space beep
+        if (this.musicStep % 4 === 1 || this.musicStep % 4 === 3) {
+          const arp = this.ctx.createOscillator();
+          const arpGain = this.ctx.createGain();
+          arp.type = 'sine';
+          arp.frequency.setValueAtTime(note * 3, t);
+          arpGain.gain.setValueAtTime(0.015, t);
+          arpGain.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+          
+          arp.connect(arpGain);
+          arpGain.connect(this.ctx.destination);
+          arp.start(t);
+          arp.stop(t + 0.13);
+        }
+
+        gain.gain.setValueAtTime(0.05, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.36);
+      } catch (e) {
+        console.warn("Synth voice play failure", e);
+      }
+
+      this.musicStep++;
+      this.musicInterval = setTimeout(playStep, 420); // Steady 142 BPM spacer
+    };
+
+    playStep();
+  }
+
+  public stopMusic() {
+    this.isMusicPlaying = false;
+    if (this.musicInterval) {
+      clearTimeout(this.musicInterval);
+      this.musicInterval = null;
+    }
   }
 
   private createNoiseBuffer(): AudioBuffer {
@@ -37,20 +155,21 @@ class SoundController {
   }
 
   public play(type: 'player_shoot' | 'enemy_shoot' | 'player_hit' | 'enemy_hit' | 'player_death' | 'enemy_death' | 'wave_start' | 'powerup') {
-    if (this.muted) return;
+    if (!this.soundEnabled) return;
     this.init();
     if (!this.ctx) return;
 
     // Resume if state is suspended (browser policy)
     if (this.ctx.state === 'suspended') {
-      this.ctx.resume();
+      try {
+        this.ctx.resume();
+      } catch {}
     }
 
     const t = this.ctx.currentTime;
 
     switch (type) {
       case 'player_shoot': {
-        // High crisp digital sound
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
         osc.type = 'triangle';
@@ -67,14 +186,12 @@ class SoundController {
         break;
       }
       case 'enemy_shoot': {
-        // Deep threatening heavy sound
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
         osc.type = 'sawtooth';
         osc.frequency.setValueAtTime(320, t);
         osc.frequency.exponentialRampToValueAtTime(80, t + 0.15);
 
-        // Lowpass filter to keep it heavy but muffled
         const filter = this.ctx.createBiquadFilter();
         filter.type = 'lowpass';
         filter.frequency.setValueAtTime(600, t);
@@ -90,7 +207,6 @@ class SoundController {
         break;
       }
       case 'player_hit': {
-        // Mid low vibration punch
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
         osc.type = 'sawtooth';
@@ -107,7 +223,6 @@ class SoundController {
         break;
       }
       case 'enemy_hit': {
-        // Metallic ping structure
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
         osc.type = 'sine';
@@ -124,9 +239,7 @@ class SoundController {
         break;
       }
       case 'player_death': {
-        // Epic white noise and multiple oscillator explosion
         try {
-          // Sub bass rumble
           const baseOsc = this.ctx.createOscillator();
           const baseGain = this.ctx.createGain();
           baseOsc.type = 'sawtooth';
@@ -139,7 +252,6 @@ class SoundController {
           baseOsc.start(t);
           baseOsc.stop(t + 0.8);
 
-          // Noise sizzle
           const noise = this.ctx.createBufferSource();
           noise.buffer = this.createNoiseBuffer();
           const filter = this.ctx.createBiquadFilter();
@@ -157,7 +269,6 @@ class SoundController {
           noise.start(t);
           noise.stop(t + 0.6);
         } catch (e) {
-          // Fallback if noise buffer creation fails
           const fallbackOsc = this.ctx.createOscillator();
           const fallbackGain = this.ctx.createGain();
           fallbackOsc.type = 'sawtooth';
@@ -174,7 +285,6 @@ class SoundController {
         break;
       }
       case 'enemy_death': {
-        // Short crackle burst
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
         osc.type = 'square';
@@ -191,7 +301,6 @@ class SoundController {
         break;
       }
       case 'wave_start': {
-        // Retro synth sweep up and down
         const osc1 = this.ctx.createOscillator();
         const osc2 = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
@@ -218,7 +327,6 @@ class SoundController {
         break;
       }
       case 'powerup': {
-        // Shiny high pitch arpeggio sweep
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
         osc.type = 'triangle';

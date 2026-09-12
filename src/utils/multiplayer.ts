@@ -8,7 +8,10 @@ import {
   getDocs,
   deleteDoc,
   serverTimestamp,
-  increment 
+  increment,
+  query,
+  where,
+  limit
 } from 'firebase/firestore';
 import { db, ensureSignedIn, handleFirestoreError, OperationType } from './firebase';
 import { Brick, PowerUp } from '../types';
@@ -61,6 +64,7 @@ export interface MultiplayerPlayer {
   isFiring: boolean;
   lastUpdatedAt: number;
   lives: number;
+  kills?: number;
 }
 
 export interface RoomState {
@@ -71,7 +75,7 @@ export interface RoomState {
   createdAt: any;
   rematchRequesterId?: string | null;
   rematchStatus?: 'pending' | 'accepted' | 'declined' | null;
-  gameMode?: 'pvp' | 'coop';
+  gameMode?: 'pvp' | 'coop' | 'matchmaking_pvp';
 }
 
 // Generate a random room ID (4 characters, uppercase)
@@ -149,6 +153,121 @@ export async function createRoom(pilotName: string, myId: string, gameMode: 'pvp
     handleFirestoreError(err, OperationType.CREATE, `rooms/${roomId}/players/${myId}`);
   }
   return roomId;
+}
+
+/**
+ * Seeks an active matchmaking room in Firestore or spawns a new one if none exist.
+ */
+export async function joinOrCreateMatchmakingRoom(pilotName: string, myId: string): Promise<{ roomId: string, isHost: boolean }> {
+  await ensureSignedIn();
+
+  const roomsRef = collection(db, 'rooms');
+  // Look for a room with status === 'lobby', gameMode === 'matchmaking_pvp'
+  const q = query(
+    roomsRef,
+    where('status', '==', 'lobby'),
+    where('gameMode', '==', 'matchmaking_pvp'),
+    limit(5)
+  );
+
+  let snap;
+  try {
+    snap = await getDocs(q);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.LIST, 'rooms');
+  }
+
+  // Iterate over matching rooms and check if they have space (exactly 1 player inside)
+  if (snap && !snap.empty) {
+    for (const roomDoc of snap.docs) {
+      const roomId = roomDoc.id;
+      const playersColl = collection(db, 'rooms', roomId, 'players');
+      let playersSnap;
+      try {
+        playersSnap = await getDocs(playersColl);
+      } catch (e) {
+        continue;
+      }
+
+      if (playersSnap && playersSnap.size === 1) {
+        // Room has exactly 1 host player. Join it!
+        const playerDocRef = doc(db, 'rooms', roomId, 'players', myId);
+        const joinerPlayerData: MultiplayerPlayer = {
+          id: myId,
+          name: pilotName,
+          status: 'ready',
+          x: 700,
+          y: 337,
+          angle: Math.PI, // Face the host
+          score: 0,
+          health: 100,
+          maxHealth: 100,
+          isInvulnerable: false,
+          activePowerUp: null,
+          isFiring: false,
+          lastUpdatedAt: Date.now(),
+          lives: 3
+        };
+
+        try {
+          await setDoc(playerDocRef, joinerPlayerData);
+          // Update room status to playing instantly because both are ready!
+          const roomRef = doc(db, 'rooms', roomId);
+          await updateDoc(roomRef, {
+            status: 'playing',
+            createdAt: Date.now()
+          });
+          return { roomId, isHost: false };
+        } catch (err) {
+          console.warn("Failed to join matchmaking room, trying next or creating...", err);
+        }
+      }
+    }
+  }
+
+  // No suitable room found. Create a new matchmaking lobby room!
+  let roomId = generateRoomId();
+  const roomRef = doc(db, 'rooms', roomId);
+  const roomData: RoomState = {
+    roomId,
+    hostId: myId,
+    status: 'lobby',
+    currentWave: 1,
+    createdAt: Date.now(),
+    gameMode: 'matchmaking_pvp'
+  };
+
+  try {
+    await setDoc(roomRef, roomData);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `rooms/${roomId}`);
+  }
+
+  const hostPlayerDocRef = doc(db, 'rooms', roomId, 'players', myId);
+  const hostPlayerData: MultiplayerPlayer = {
+    id: myId,
+    name: pilotName,
+    status: 'ready',
+    x: 500,
+    y: 337,
+    angle: 0,
+    score: 0,
+    health: 100,
+    maxHealth: 100,
+    isInvulnerable: false,
+    activePowerUp: null,
+    isFiring: false,
+    lastUpdatedAt: Date.now(),
+    lives: 3
+  };
+
+  try {
+    await setDoc(hostPlayerDocRef, hostPlayerData);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `rooms/${roomId}/players/${myId}`);
+  }
+
+  return { roomId, isHost: true };
 }
 
 /**
